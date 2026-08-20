@@ -1,4 +1,5 @@
 {
+  "outputDirectory": "public",
   "functions": {
     "api/bot.ts": { "memory": 1024, "maxDuration": 30 },
     "api/kie-callback.ts": { "memory": 1024, "maxDuration": 10 },
