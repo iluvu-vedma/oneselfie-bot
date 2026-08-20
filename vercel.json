@@ -5,6 +5,6 @@
     "api/sweep.ts": { "memory": 1024, "maxDuration": 60 }
   },
   "crons": [
-    { "path": "/api/sweep", "schedule": "* * * * *" }
+    { "path": "/api/sweep", "schedule": "0 3 * * *" }
   ]
 }
