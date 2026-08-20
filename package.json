@@ -1,0 +1,25 @@
+{
+  "name": "oneselfie-bot",
+  "version": "1.0.0",
+  "description": "OneSelfie — нейрофотосессия в Telegram",
+  "private": true,
+  "scripts": {
+    "dev": "tsx watch --env-file=.env dev.ts",
+    "build": "tsc --noEmit",
+    "typecheck": "tsc --noEmit",
+    "set-webhook": "tsx --env-file=.env scripts/set-webhook.ts",
+    "drop-webhook": "tsx --env-file=.env scripts/set-webhook.ts --drop",
+    "check": "tsx scripts/check-economy.ts && tsx scripts/check-state.ts",
+    "screens": "tsx scripts/preview-screens.ts"
+  },
+  "license": "ISC",
+  "dependencies": {
+    "@upstash/redis": "^1.35.7",
+    "grammy": "^1.45.1"
+  },
+  "devDependencies": {
+    "@vercel/node": "^5.10.0",
+    "tsx": "^4.23.12",
+    "typescript": "^5.9.3"
+  }
+}

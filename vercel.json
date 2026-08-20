@@ -1,0 +1,10 @@
+{
+  "functions": {
+    "api/bot.ts": { "memory": 1024, "maxDuration": 30 },
+    "api/kie-callback.ts": { "memory": 1024, "maxDuration": 10 },
+    "api/sweep.ts": { "memory": 1024, "maxDuration": 60 }
+  },
+  "crons": [
+    { "path": "/api/sweep", "schedule": "* * * * *" }
+  ]
+}
