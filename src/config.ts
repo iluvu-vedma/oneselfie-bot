@@ -37,20 +37,20 @@ export type PackageId = "probe" | "set" | "big";
 
 export interface SparkPackage {
   id: PackageId;
-  /** Отображаемое имя. */
+  /** Имя в счёте Telegram и в /stats. Считается кадрами: sparks / SPARKS_PER_IMAGE. */
   title: string;
   /** Сколько звёзд платит пользователь. */
   stars: number;
   /** Сколько искр зачисляется (включая бонус). Делится на SPARKS_PER_IMAGE нацело. */
   sparks: number;
-  /** Бонусные искры сверху, для подписи на кнопке. */
+  /** Бонусные искры, уже входят в sparks. На кнопке не пишутся — см. paywallKeyboard. */
   bonus: number;
 }
 
 export const PACKAGES: Record<PackageId, SparkPackage> = {
-  probe: { id: "probe", title: "Проба", stars: 60, sparks: 60, bonus: 0 },
-  set: { id: "set", title: "Сет", stars: 170, sparks: 180, bonus: 10 },
-  big: { id: "big", title: "Большой", stars: 330, sparks: 360, bonus: 30 },
+  probe: { id: "probe", title: "5 кадров", stars: 60, sparks: 60, bonus: 0 },
+  set: { id: "set", title: "15 кадров", stars: 170, sparks: 180, bonus: 10 },
+  big: { id: "big", title: "30 кадров", stars: 330, sparks: 360, bonus: 30 },
 };
 
 export const PACKAGE_ORDER: PackageId[] = ["probe", "set", "big"];

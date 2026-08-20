@@ -1,6 +1,7 @@
 import { InlineKeyboard } from "grammy";
 import {
   CURRENCY_EMOJI,
+  CURRENCY_FORMS,
   MAX_PHOTOS,
   PACKAGES,
   PACKAGE_ORDER,
@@ -20,6 +21,11 @@ export function plural(n: number, forms: [string, string, string]): string {
 /** Валюта в интерфейсе всегда с эмодзи. */
 export function sparks(n: number): string {
   return `${n} ${CURRENCY_EMOJI}`;
+}
+
+/** «12 искр ✨» — там, где валюту нужно назвать словом, а не одним значком. */
+export function sparksNamed(n: number): string {
+  return `${n} ${plural(n, CURRENCY_FORMS)} ${CURRENCY_EMOJI}`;
 }
 
 export function framesFor(sparksAmount: number): number {
@@ -55,20 +61,19 @@ export const generateKeyboard = () =>
   );
 
 /**
- * Пейволл. На каждой кнопке и искры, и кадры: валюта добавляет шаг пересчёта
- * в голове, и без «это 15 кадров» часть людей отваливается прямо здесь.
+ * Пейволл. Порядок частей — «что получу → чем плачу»: решение принимается
+ * по кадрам и звёздам, искры между ними служебные. Про бонус говорит текст
+ * над кнопками: на кнопке «+10 ✨ в подарок» читалось как 190 вместо 180.
  */
 export function paywallKeyboard(): InlineKeyboard {
   const kb = new InlineKeyboard();
   PACKAGE_ORDER.forEach((id, i) => {
     const p = PACKAGES[id];
     const parts = [
-      p.title,
+      frames(framesFor(p.sparks)),
       sparks(p.sparks),
       `${p.stars} ⭐`,
-      `это ${frames(framesFor(p.sparks))}`,
     ];
-    if (p.bonus > 0) parts.push(`+${sparks(p.bonus)} в подарок`);
     kb.text(parts.join(" · "), CB.buy(p.id));
     if (i < PACKAGE_ORDER.length - 1) kb.row();
   });
@@ -79,32 +84,36 @@ export function paywallKeyboard(): InlineKeyboard {
 export const T = {
   /** Шаг 2. Про искры здесь ни слова — валюта появляется только на пейволле. */
   intro:
-    "Ваши фотографии из ваших селфи.\nОписывать ничего не нужно.",
+    "Пришлите свои селфи — сделаю из них фотосессию: студия, улица, вечерний город." +
+    "\nПридумывать описания не нужно, сцену выбираю сам.",
 
   askPhotos:
     `Пришлите от одного до четырёх селфи: лицо крупно, разные ракурсы, ` +
-    `без очков и головного убора.\nЧем больше кадров — тем точнее сходство.`,
+    `без очков и головного убора.\nЧем больше селфи — тем точнее сходство.`,
 
   photoAccepted: (n: number) => `${n} из ${MAX_PHOTOS} ✓`,
 
-  photoEnough: "Уже достаточно",
+  photoEnough: "Четырёх селфи достаточно. Если хотите заменить их — /new",
 
   photoFailed: "Не получилось принять это фото. Пришлите ещё раз.",
 
-  notAPhoto: "Нужно именно фото, не файл и не текст.",
+  notAPhoto: "Жду селфи фотографией — файл и текст не подойдут.",
 
   needPhotosFirst: "Сначала пришлите селфи.",
 
-  paywall: `Один кадр стоит ${sparks(SPARKS_PER_IMAGE)}.`,
+  paywall:
+    `Один кадр — ${sparksNamed(SPARKS_PER_IMAGE)}. Искры покупаются за звёзды Telegram ⭐.` +
+    `\nЧем больше пакет, тем больше искр за звезду.`,
 
+  /** Считаем недостачу, а не остаток: «у вас 0 ✨» выглядит как сбой,
+   *  а рядом с балансом в подписи под кадром остаток повторялся дважды. */
   notEnough: (balance: number) =>
-    `На кадр нужно ${sparks(SPARKS_PER_IMAGE)}, у вас ${sparks(balance)}. Пополнить?`,
+    `До кадра не хватает ${sparks(SPARKS_PER_IMAGE - balance)}. Выберите пакет:`,
 
   paid: (added: number, balance: number) =>
-    `+${sparks(added)}. Баланс: ${sparks(balance)} — это ${frames(framesFor(balance))}.`,
+    `Оплата прошла, +${sparks(added)}. Баланс: ${balanceLine(balance)}`,
 
-  balance: (balance: number) =>
-    `${sparks(balance)} — это ${frames(framesFor(balance))}.`,
+  balance: (balance: number) => `Баланс: ${balanceLine(balance)}`,
 
   ready: (balance: number) => `Баланс: ${balanceLine(balance)}`,
 
@@ -112,14 +121,17 @@ export const T = {
 
   alreadyGenerating: "Кадр уже готовится",
 
-  refunded: (cost: number) => `Кадр не получился, вернул ${sparks(cost)}.`,
+  refunded: (cost: number) =>
+    `Кадр не получился — вернул ${sparks(cost)} на баланс. Попробуйте ещё раз, кадр будет другой.`,
 
-  repeatedFails: "Что-то пошло не так, вернём деньги. Напишите сюда — разберёмся руками.",
+  repeatedFails:
+    "Кадры не получаются несколько раз подряд. Искры вернул на баланс — " +
+    "напишите сюда, верну звёзды и разберусь.",
 
   photosReset:
-    "Старые селфи убрал. Пришлите новые — от одного до четырёх.",
+    "Убрал старые селфи, искры остались на балансе. Пришлите новые — от одного до четырёх.",
 
-  invoiceTitle: (title: string) => `${title}`,
+  invoiceTitle: (title: string) => `OneSelfie · ${title}`,
   invoiceDescription: (sparksAmount: number) =>
-    `${sparks(sparksAmount)} — это ${frames(framesFor(sparksAmount))}.`,
+    `${sparksNamed(sparksAmount)} на баланс. Один кадр — ${sparks(SPARKS_PER_IMAGE)}.`,
 };
