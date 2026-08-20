@@ -18,6 +18,19 @@ async function main() {
     drop_pending_updates: true,
   });
   console.log(res);
+
+  // Меню команд. Ставится здесь, а не в боте: на вебхуке это был бы лишний
+  // запрос к Telegram на каждом апдейте. /stats владельца в меню не место.
+  console.log(
+    await call("setMyCommands", {
+      commands: [
+        { command: "start", description: "Показать, что делать дальше" },
+        { command: "balance", description: "Баланс искр и покупка" },
+        { command: "new", description: "Заменить селфи" },
+      ],
+    })
+  );
+
   console.log(await call("getWebhookInfo", {}));
 }
 

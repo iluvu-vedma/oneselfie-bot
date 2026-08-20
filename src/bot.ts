@@ -143,7 +143,10 @@ bot.callbackQuery(/^buy:(probe|set|big)$/, async (ctx) => {
 
 bot.on("pre_checkout_query", async (ctx) => {
   const ok = Boolean(findPackage(ctx.preCheckoutQuery.invoice_payload));
-  await ctx.answerPreCheckoutQuery(ok, ok ? undefined : "Пакет не найден");
+  await ctx.answerPreCheckoutQuery(
+    ok,
+    ok ? undefined : "Счёт устарел. Откройте пакеты заново — /balance"
+  );
 });
 
 /** Только собственные ключи: "toString" в payload не должен пройти как пакет. */
