@@ -1,11 +1,13 @@
 import { redis, k, num, bump } from "./kv";
-import { GEN_LOCK_TTL_SEC, MAX_PHOTOS, TASK_TTL_SEC } from "./config";
+import { GEN_LOCK_TTL_SEC, HUB_TTL_SEC, MAX_PHOTOS, TASK_TTL_SEC } from "./config";
 import { SCENES } from "./scenes";
 
 export type UserStatus = "started" | "photos_ready" | "paid";
 
 export interface UserProfile {
   status: UserStatus;
+  /** Имя из Telegram. Нужно приветствию, которое рисуется и без входящего апдейта. */
+  name: string;
   fails: number;
   createdAt: number;
 }
@@ -38,9 +40,15 @@ export async function getUser(chatId: number): Promise<UserProfile> {
   const raw = (await redis.hgetall<Record<string, unknown>>(k.user(chatId))) ?? {};
   return {
     status: (raw.status as UserStatus) ?? "started",
+    name: raw.name ? String(raw.name) : "",
     fails: num(raw.fails),
     createdAt: num(raw.createdAt),
   };
+}
+
+/** Имя запоминается, а не берётся из апдейта: экран перерисовывается и по крону. */
+export async function setName(chatId: number, name: string): Promise<void> {
+  if (name) await redis.hset(k.user(chatId), { name });
 }
 
 export async function setStatus(chatId: number, status: UserStatus): Promise<void> {
@@ -110,6 +118,34 @@ export async function releaseGenLock(chatId: number, token?: string): Promise<vo
     return;
   }
   await redis.eval(UNLOCK_LUA, [k.genLock(chatId)], [token]);
+}
+
+/** Идёт ли прямо сейчас генерация. Экран «идёт работа» выводится из этого, а не из флага в профиле. */
+export async function isGenerating(chatId: number): Promise<boolean> {
+  return (await redis.exists(k.genLock(chatId))) === 1;
+}
+
+// ── Экран ────────────────────────────────────────────────────────────────────
+
+/** message_id текущего экрана или null, если экрана ещё нет. */
+export async function getHubId(chatId: number): Promise<number | null> {
+  const id = num(await redis.get(k.hub(chatId)));
+  return id > 0 ? id : null;
+}
+
+export async function setHubId(chatId: number, messageId: number): Promise<void> {
+  await redis.set(k.hub(chatId), messageId, { ex: HUB_TTL_SEC });
+}
+
+/**
+ * Читает и сразу забывает id: экран сейчас переедет вниз, и старый message_id
+ * не должен пережить неудачное удаление — иначе бот будет править сообщение,
+ * которого пользователь уже не видит.
+ */
+export async function takeHubId(chatId: number): Promise<number | null> {
+  const id = await getHubId(chatId);
+  if (id !== null) await redis.del(k.hub(chatId));
+  return id;
 }
 
 // ── Селфи ────────────────────────────────────────────────────────────────────

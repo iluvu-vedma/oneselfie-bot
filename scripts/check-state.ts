@@ -14,6 +14,7 @@ const k = {
   photos: (id: any) => `photos:${id}`,
   photoSlots: (id: any) => `photoslots:${id}`,
   genLock: (id: any) => `gen:${id}`,
+  hub: (id: any) => `hub:${id}`,
   task: (id: string) => `task:${id}`,
   payment: (id: string) => `pay:${id}`,
   pending: "pending",
@@ -107,6 +108,20 @@ async function main() {
   check(stale.length === 2 && stale.includes("t1"), `в очереди добора: ${stale.join(",")}`);
   await S.forgetPending("t1");
   check((await S.pendingOlderThan(Date.now() + 1000)).length === 1, "выданная задача ушла из очереди");
+
+  // Экран: id читается один раз и сразу забывается — иначе после переезда вниз
+  // бот будет править сообщение, которого пользователь уже не видит.
+  await S.setHubId(chat, 4242);
+  check((await S.getHubId(chat)) === 4242, "id экрана запомнился");
+  check((await S.takeHubId(chat)) === 4242, "takeHubId вернул id");
+  check((await S.getHubId(chat)) === null, "takeHubId забыл id");
+  check((await S.takeHubId(chat)) === null, "второй takeHubId ничего не вернул");
+
+  // Стадия «идёт работа» выводится из замка, а не из отдельного флага.
+  check((await S.isGenerating(chat)) === false, "без замка генерация не идёт");
+  const genToken = (await S.acquireGenLock(chat))!;
+  check((await S.isGenerating(chat)) === true, "с замком генерация идёт");
+  await S.releaseGenLock(chat, genToken);
 
   // /new: селфи сбрасываются, баланс остаётся.
   await S.credit(chat, 60);

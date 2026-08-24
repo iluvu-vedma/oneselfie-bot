@@ -7,6 +7,14 @@ import {
   PackageId,
   SPARKS_PER_IMAGE,
 } from "./config";
+import {
+  drawHomeHere,
+  drawPaywallHere,
+  moveHome,
+  startGeneration,
+} from "./flow";
+import { adopt, isNotModified } from "./hub";
+import { num, t } from "./i18n";
 import { bump } from "./kv";
 import { uploadImage } from "./kie";
 import { isOwner, notifyOwner } from "./owner";
@@ -19,98 +27,95 @@ import {
   credit,
   ensureUser,
   getBalance,
-  getPhotos,
+  isGenerating,
   markPhotosReady,
+  photoCount,
   releasePhotoSlot,
   reservePhotoSlot,
+  setName,
   setStatus,
 } from "./store";
-import {
-  CB,
-  T,
-  beginKeyboard,
-  doneKeyboard,
-  generateKeyboard,
-  paywallKeyboard,
-} from "./ui";
-import { askPhotos, routeToNextScreen, showPaywall, startGeneration } from "./flow";
+import { CB, sparks, sparksNamed } from "./ui";
 
 export { bot };
 
-// ── Шаг 1–2. Вход и «что будет» ──────────────────────────────────────────────
+/**
+ * Роутер экранов. Каждая кнопка правит то самое сообщение, на котором стоит,
+ * — новых сообщений от нажатий не появляется.
+ *
+ * Новое сообщение отправляется ровно в четырёх местах: картинка-пример при
+ * первом старте, счёт Telegram, готовый кадр и статистика владельца. После
+ * каждого из них экран переезжает вниз.
+ */
+
+// ── Команды ──────────────────────────────────────────────────────────────────
+
 bot.command("start", async (ctx) => {
   const chatId = ctx.chat.id;
-  await ensureUser(chatId);
+  const isNew = await ensureUser(chatId);
+  await remember(ctx);
   await bump("start");
 
-  const [photos, balance] = await Promise.all([getPhotos(chatId), getBalance(chatId)]);
-  // Повторный /start ничего не сбрасывает: сразу на нужный экран.
-  if (photos.length > 0 || balance > 0) return routeToNextScreen(chatId);
-
-  if (EXAMPLE_IMAGE_URL) {
-    await ctx.replyWithPhoto(EXAMPLE_IMAGE_URL, {
-      caption: T.intro,
-      reply_markup: beginKeyboard(),
+  // Сетка примеров — отдельный объект в ленте и только один раз: это подарок
+  // на входе, а не экран. Повторный /start ничего не сбрасывает и не дарит снова.
+  if (isNew && EXAMPLE_IMAGE_URL) {
+    await ctx.replyWithPhoto(EXAMPLE_IMAGE_URL).catch((e) => {
+      console.error("example image failed", e);
     });
-  } else {
-    await ctx.reply(T.intro, { reply_markup: beginKeyboard() });
   }
+  await moveHome(chatId);
 });
 
-bot.callbackQuery(CB.begin, async (ctx) => {
-  await ctx.answerCallbackQuery();
-  await dropKeyboard(ctx);
-  await askPhotos(ctx.chat!.id);
+bot.command("balance", async (ctx) => {
+  await ensureUser(ctx.chat.id);
+  await remember(ctx);
+  await moveHome(ctx.chat.id);
 });
 
-// ── Шаг 3. Селфи ─────────────────────────────────────────────────────────────
+bot.command("new", async (ctx) => {
+  const chatId = ctx.chat.id;
+  await ensureUser(chatId);
+  await remember(ctx);
+  await clearPhotos(chatId); // баланс искр сохраняется — он привязан к человеку
+  await moveHome(chatId, { notice: t("home.notice.reset") });
+});
+
+bot.command("stats", async (ctx) => {
+  if (!isOwner(ctx.chat.id)) return;
+  await ctx.reply(await buildStats(), { parse_mode: "HTML" });
+});
+
+// ── Селфи ────────────────────────────────────────────────────────────────────
+/**
+ * Отдельного шага «Готово» нет: одного селфи уже достаточно, а экран после
+ * каждого фото сам переезжает вниз в новом состоянии. Это на одно нажатие
+ * короче и не даёт человеку зависнуть на кнопке, которая ничего не решает.
+ */
 bot.on("message:photo", async (ctx) => {
   const chatId = ctx.chat.id;
   await ensureUser(chatId);
+  await remember(ctx);
 
   const slot = await reservePhotoSlot(chatId);
   if (slot === null) {
-    await ctx.reply(T.photoEnough);
-    return;
+    return moveHome(chatId, { notice: t("home.notice.photoEnough") });
   }
 
-  let count: number;
   try {
     const sizes = ctx.message.photo;
     const largest = sizes[sizes.length - 1];
     const bytes = await downloadTelegramFile(largest.file_id);
     const url = await uploadImage(bytes, `${chatId}-${Date.now()}-${slot}.jpg`);
-    count = await addPhotoUrl(chatId, url);
+    await addPhotoUrl(chatId, url);
   } catch (e) {
     await releasePhotoSlot(chatId);
     await notifyOwner(`Загрузка селфи упала у ${chatId}: ${String(e)}`);
-    await ctx.reply(T.photoFailed);
-    return;
+    return moveHome(chatId, { notice: t("home.notice.photoFailed") });
   }
 
-  if (count >= MAX_PHOTOS) {
-    await ctx.reply(T.photoAccepted(count));
-    return finishPhotos(chatId);
-  }
-  await ctx.reply(T.photoAccepted(count), { reply_markup: doneKeyboard() });
-});
-
-bot.callbackQuery(CB.photosDone, async (ctx) => {
-  await ctx.answerCallbackQuery();
-  await dropKeyboard(ctx);
-  const chatId = ctx.chat!.id;
-  if ((await getPhotos(chatId)).length === 0) {
-    await ctx.reply(T.needPhotosFirst);
-    return askPhotos(chatId);
-  }
-  await finishPhotos(chatId);
-});
-
-/** Селфи собраны → шаг 4 (пейволл) или сразу шаг 6, если искры уже есть. */
-async function finishPhotos(chatId: number): Promise<void> {
   if (await markPhotosReady(chatId)) await bump("photos_uploaded");
-  await routeToNextScreen(chatId);
-}
+  await moveHome(chatId);
+});
 
 /**
  * Байты селфи забираются нашим сервером и уходят в kie уже как загруженный файл.
@@ -126,15 +131,75 @@ async function downloadTelegramFile(fileId: string): Promise<Buffer> {
   return Buffer.from(await res.arrayBuffer());
 }
 
-// ── Шаг 5. Оплата ────────────────────────────────────────────────────────────
-bot.callbackQuery(/^buy:(probe|set|big)$/, async (ctx) => {
+// ── Навигация ────────────────────────────────────────────────────────────────
+
+bot.callbackQuery(CB.home, async (ctx) => {
   await ctx.answerCallbackQuery();
+  await drawHomeHere(ctx);
+});
+
+bot.callbackQuery(CB.paywall, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  await drawPaywallHere(ctx);
+});
+
+bot.callbackQuery(CB.reset, async (ctx) => {
+  await ctx.answerCallbackQuery({ text: t("toast.reset") });
+  await clearPhotos(ctx.chat!.id);
+  await drawHomeHere(ctx, { notice: t("home.notice.reset") });
+});
+
+// ── Кадр ─────────────────────────────────────────────────────────────────────
+/**
+ * Все отказы — тостом, а не экраном: они ничего не меняют в состоянии,
+ * и перерисовывать ради них нечего.
+ */
+bot.callbackQuery(CB.generate, async (ctx) => {
+  const chatId = ctx.chat!.id;
+  const [photos, balance, busy] = await Promise.all([
+    photoCount(chatId),
+    getBalance(chatId),
+    isGenerating(chatId),
+  ]);
+
+  if (photos === 0) {
+    await ctx.answerCallbackQuery({ text: t("toast.needPhotos"), show_alert: true });
+    return drawHomeHere(ctx);
+  }
+  if (busy) {
+    await ctx.answerCallbackQuery({ text: t("toast.busy"), show_alert: true });
+    return drawHomeHere(ctx);
+  }
+  if (balance < SPARKS_PER_IMAGE) {
+    await ctx.answerCallbackQuery({
+      text: t("toast.needSparks", { amount: sparks(SPARKS_PER_IMAGE - balance) }),
+      show_alert: true,
+    });
+    return drawPaywallHere(ctx);
+  }
+
+  await ctx.answerCallbackQuery();
+  // Рисовать будет startGeneration — ему нужно знать, какое сообщение править.
+  await adopt(ctx);
+  await startGeneration(chatId);
+});
+
+// ── Оплата ───────────────────────────────────────────────────────────────────
+/**
+ * Счёт — отдельный объект в ленте: он свой у Telegram, и внутрь экрана его не
+ * положить. Экран остаётся на месте: если человек передумает, пакеты рядом.
+ */
+bot.callbackQuery(CB.BUY_RE, async (ctx) => {
   const id = ctx.match![1] as PackageId;
   const p = PACKAGES[id];
+  await ctx.answerCallbackQuery({ text: t("toast.invoice", { stars: num(p.stars) }) });
   await ctx.api.sendInvoice(
     ctx.chat!.id,
-    T.invoiceTitle(p.title),
-    T.invoiceDescription(p.sparks),
+    t("invoice.title", { title: p.title }),
+    t("invoice.description", {
+      sparksNamed: sparksNamed(p.sparks),
+      price: sparks(SPARKS_PER_IMAGE),
+    }),
     p.id, // payload: число искр берётся из константы по этому id
     "XTR",
     [{ label: p.title, amount: p.stars }]
@@ -143,10 +208,7 @@ bot.callbackQuery(/^buy:(probe|set|big)$/, async (ctx) => {
 
 bot.on("pre_checkout_query", async (ctx) => {
   const ok = Boolean(findPackage(ctx.preCheckoutQuery.invoice_payload));
-  await ctx.answerPreCheckoutQuery(
-    ok,
-    ok ? undefined : "Счёт устарел. Откройте пакеты заново — /balance"
-  );
+  await ctx.answerPreCheckoutQuery(ok, ok ? undefined : t("invoice.expired"));
 });
 
 /** Только собственные ключи: "toString" в payload не должен пройти как пакет. */
@@ -168,80 +230,53 @@ bot.on("message:successful_payment", async (ctx) => {
   // Зачисление ровно один раз на платёж.
   if (!(await claimPayment(sp.telegram_payment_charge_id))) return;
 
-  const balance = await credit(chatId, p.sparks);
+  await credit(chatId, p.sparks);
   await setStatus(chatId, "paid");
   await bump(`paid_${p.id}`);
   await bump("sparks_sold", p.sparks);
   await bump("stars_earned", p.stars);
   await notifyOwner(`💸 ${chatId} купил «${p.title}» за ${p.stars} ⭐ → +${p.sparks} ✨`);
 
-  await ctx.reply(T.paid(p.sparks, balance), { reply_markup: generateKeyboard() });
-});
-
-// ── Шаг 6. Кадр ──────────────────────────────────────────────────────────────
-bot.callbackQuery(CB.generate, async (ctx) => {
-  await ctx.answerCallbackQuery();
-  await dropKeyboard(ctx); // кнопка убирается на время генерации
-  await startGeneration(ctx.chat!.id);
-});
-
-// ── Шаг 9–10. Служебные команды ──────────────────────────────────────────────
-bot.command("new", async (ctx) => {
-  const chatId = ctx.chat.id;
-  await ensureUser(chatId);
-  await clearPhotos(chatId); // баланс искр сохраняется — он привязан к человеку
-  await ctx.reply(T.photosReset);
-});
-
-bot.callbackQuery(CB.newPhotos, async (ctx) => {
-  await ctx.answerCallbackQuery();
-  await clearPhotos(ctx.chat!.id);
-  await ctx.reply(T.photosReset);
-});
-
-bot.command("balance", async (ctx) => {
-  const chatId = ctx.chat.id;
-  await ensureUser(chatId);
-  const balance = await getBalance(chatId);
-  if (balance < SPARKS_PER_IMAGE) {
-    await ctx.reply(T.balance(balance));
-    return showPaywall(chatId, T.notEnough(balance));
-  }
-  await ctx.reply(T.balance(balance), { reply_markup: generateKeyboard() });
-});
-
-bot.command("stats", async (ctx) => {
-  if (!isOwner(ctx.chat.id)) return;
-  await ctx.reply(await buildStats(), { parse_mode: "HTML" });
+  // Чек Telegram уже лёг в ленту — экран переезжает под него.
+  await moveHome(chatId, { notice: t("home.notice.paid", { added: sparks(p.sparks) }) });
 });
 
 // ── Всё остальное ────────────────────────────────────────────────────────────
+
 bot.on("message", async (ctx) => {
   const chatId = ctx.chat.id;
   await ensureUser(chatId);
-  const [photos, balance] = await Promise.all([getPhotos(chatId), getBalance(chatId)]);
-  if (photos.length === 0) {
-    await ctx.reply(T.notAPhoto);
-    return askPhotos(chatId);
-  }
-  await ctx.reply(
-    balance >= SPARKS_PER_IMAGE ? T.ready(balance) : T.notEnough(balance),
-    { reply_markup: balance >= SPARKS_PER_IMAGE ? generateKeyboard() : paywallKeyboard() }
-  );
+  await remember(ctx);
+  const enough = (await photoCount(chatId)) >= MAX_PHOTOS;
+  await moveHome(chatId, { notice: enough ? undefined : t("home.notice.notAPhoto") });
 });
 
-/** Снимает кнопку с уже отправленного сообщения, чтобы по ней не жали второй раз. */
-async function dropKeyboard(ctx: Context): Promise<void> {
-  try {
-    await ctx.editMessageReplyMarkup({ reply_markup: undefined });
-  } catch {
-    /* сообщение старое или уже без кнопок — не важно */
-  }
+/** Имя нужно приветствию, а оно рисуется и вне входящего апдейта. */
+async function remember(ctx: Context): Promise<void> {
+  const name = ctx.from?.first_name;
+  if (name && ctx.chat) await setName(ctx.chat.id, name);
 }
 
-bot.catch((err) => {
+// ── Ошибки ───────────────────────────────────────────────────────────────────
+/**
+ * Наружу ошибка не всплывает никогда: человеку — тост о том, что искры на месте,
+ * в лог — стек. «message is not modified» не ошибка вовсе: экран уже в нужном
+ * состоянии, и это ровно то, чего мы добивались.
+ */
+bot.catch(async (err) => {
   const e = err.error;
-  if (e instanceof GrammyError) console.error("Telegram error:", e.description);
+
+  if (isNotModified(e)) return;
+
+  if (e instanceof GrammyError) console.error("Telegram error:", e.description, e.payload);
   else if (e instanceof HttpError) console.error("Network error:", e);
   else console.error("Bot error:", e);
+
+  try {
+    if (err.ctx.callbackQuery) {
+      await err.ctx.answerCallbackQuery({ text: t("toast.error"), show_alert: true });
+    }
+  } catch {
+    /* ответить по коллбэку тоже не вышло — это уже не важно */
+  }
 });

@@ -37,6 +37,11 @@ export const k = {
   photoSlots: (chatId: number | string) => `photoslots:${chatId}`,
   /** Замок «кадр уже готовится». Один тап — один кадр. */
   genLock: (chatId: number | string) => `gen:${chatId}`,
+  /**
+   * message_id экрана. Весь интерфейс живёт в одном сообщении и редактируется;
+   * без этого ключа бот не знает, что именно перерисовывать.
+   */
+  hub: (chatId: number | string) => `hub:${chatId}`,
   /** Задача генерации. */
   task: (taskId: string) => `task:${taskId}`,
   /** Отметка обработанного платежа, чтобы искры не зачислились дважды. */

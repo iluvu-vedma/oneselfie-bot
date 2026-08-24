@@ -9,7 +9,7 @@
     "typecheck": "tsc --noEmit",
     "set-webhook": "tsx --env-file=.env scripts/set-webhook.ts",
     "drop-webhook": "tsx --env-file=.env scripts/set-webhook.ts --drop",
-    "check": "tsx scripts/check-economy.ts && tsx scripts/check-state.ts",
+    "check": "tsx scripts/check-economy.ts && tsx scripts/check-state.ts && tsx scripts/check-flow.ts && tsx scripts/preview-screens.ts",
     "screens": "tsx scripts/preview-screens.ts"
   },
   "license": "ISC",
