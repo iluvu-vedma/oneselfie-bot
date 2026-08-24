@@ -23,7 +23,7 @@ export const redis = new Redis({ url, token });
 
 // ── Ключи ────────────────────────────────────────────────────────────────────
 export const k = {
-  /** Профиль: status, sceneIndex, fails, createdAt. Баланса тут НЕТ. */
+  /** Профиль: status, name, model, source, topupFrom, fails, createdAt. Баланса тут НЕТ. */
   user: (chatId: number | string) => `user:${chatId}`,
   /**
    * Баланс искр отдельным ключом-числом.

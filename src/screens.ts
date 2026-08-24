@@ -7,7 +7,6 @@ import {
   MODEL_ORDER,
   PACKS,
   PRIMARY_MODEL,
-  Pack,
   PayMethod,
   SUPPORT_URL,
   ModelId,
@@ -62,6 +61,13 @@ export interface Notice {
   notice?: string;
 }
 
+/**
+ * Потолок бонуса. Считается из реестра пакетов, а не пишется в локали: обещание
+ * «до +20%» обязано меняться вместе с таблицей, иначе экран врёт молча.
+ */
+const MAX_BONUS_FIAT = Math.max(...PACKS.map((p) => p.bonusFiat));
+const MAX_BONUS_STARS = Math.max(...PACKS.map((p) => p.bonusStars));
+
 // ── home ─────────────────────────────────────────────────────────────────────
 
 export interface HomeState extends Notice {
@@ -76,9 +82,18 @@ export function home(s: HomeState): Screen {
       s.notice,
       [t("home.hello", { name: esc(s.name ?? "") }), t("home.lead")],
       [t("home.create.title"), t("home.create.body")],
-      [t("home.pay.title"), t("home.pay.body", { price: sparks(MODELS[CHEAPEST_MODEL].price) })],
+      // Оффер начинается здесь, а не на экране оплаты: воронка стартует со входа,
+      // и акция обязана дожить до неё, а не ждать, пока человек сам дойдёт.
+      [
+        t("home.pay.title"),
+        t("home.pay.body", {
+          price: sparks(MODELS[CHEAPEST_MODEL].price),
+          bonus: num(MAX_BONUS_FIAT),
+        }),
+      ],
       // Баланс появляется, только когда он есть: «0 ✨» на входе выглядит как долг.
       s.balance > 0 && balanceOf(s.balance),
+      t("home.calm"),
       t("common.bridge")
     ),
     reply_markup: homeKeyboard(),
@@ -165,7 +180,13 @@ export interface UploadState extends Notice {
   balance: number;
 }
 
-/** Главное действие тут не кнопка, а фотография, поэтому мостик уводит в поле ввода. */
+/**
+ * Главное действие тут не кнопка, а фотография, поэтому мостик уводит в поле ввода.
+ *
+ * Возражение снимается там, где возникает: человека просят прислать собственное
+ * лицо, и первый вопрос в голове — что с ним будет дальше. Отвечать на него
+ * в разделе помощи поздно — до помощи он не дойдёт, он просто не пришлёт фото.
+ */
 export function upload(s: UploadState): Screen {
   return {
     text: compose(
@@ -173,6 +194,7 @@ export function upload(s: UploadState): Screen {
       [t("upload.title"), t("upload.body")],
       t("upload.howto"),
       contextLine(s.model, s.balance),
+      t("upload.calm"),
       t("upload.bridge")
     ),
     reply_markup: uploadKeyboard(s.model),
@@ -266,16 +288,13 @@ export interface TopupState extends Notice {
  * человек, увидевший меньший бонус уже после выбора, чувствует себя обманутым.
  */
 export function topup(s: TopupState): Screen {
-  const maxFiat = Math.max(...PACKS.map((p) => p.bonusFiat));
-  const maxStars = Math.max(...PACKS.map((p) => p.bonusStars));
-
   return {
     text: compose(
       s.notice,
       [t("topup.title"), t("topup.lead", { price: sparks(MODELS[CHEAPEST_MODEL].price) })],
       [
         t("topup.offer.title"),
-        t("topup.offer.body", { fiat: num(maxFiat), stars: num(maxStars) }),
+        t("topup.offer.body", { fiat: num(MAX_BONUS_FIAT), stars: num(MAX_BONUS_STARS) }),
       ],
       balanceOf(s.balance),
       t("topup.objection"),
@@ -297,14 +316,17 @@ export interface PacksState extends Notice {
  * Один шаблон на четыре рельса. Скидка показывается дважды: бейджем на кнопке
  * и кадрами в тексте — в процентах она абстрактна, в кадрах это товар.
  *
+ * Лестницы «200 ✨ · 550 ✨ · 1 100 ✨» в тексте нет намеренно: она слово в слово
+ * повторяла кнопки под собой и занимала место, на котором должен стоять перевод
+ * искр в кадры.
+ *
  * На звёздах бонус упирается в потолок +10% и с размером пакета не растёт,
- * поэтому и заголовок, и строка про большой пакет там другие: обещать растущую
- * скидку там, где её нет, дороже потерянного процента конверсии.
+ * поэтому и строка оффера, и строка про большой пакет там другие: обещать
+ * растущую скидку там, где её нет, дороже потерянного процента конверсии.
  */
 export function packs(s: PacksState): Screen {
   const best = PACKS[PACKS.length - 1];
   const grows = bonusOf(best, s.method) > bonusOf(PACKS[1], s.method);
-  const ladder = PACKS.map((p) => ladderItem(p, s.method)).join(" · ");
 
   return {
     text: compose(
@@ -317,10 +339,10 @@ export function packs(s: PacksState): Screen {
         }),
       ],
       [
-        grows
-          ? t("packs.offer.grow")
-          : t("packs.offer.flat", { bonus: num(bonusOf(best, s.method)) }),
-        ladder,
+        t("packs.offer.title"),
+        t(grows ? "packs.offer.grow" : "packs.offer.flat", {
+          bonus: num(bonusOf(best, s.method)),
+        }),
       ],
       t(grows ? "packs.best.grow" : "packs.best.flat", {
         price: money(priceOf(best, s.method), s.method),
@@ -334,12 +356,6 @@ export function packs(s: PacksState): Screen {
     ),
     reply_markup: packsKeyboard(s.method, s.from),
   };
-}
-
-function ladderItem(pack: Pack, method: PayMethod): string {
-  const bonus = bonusOf(pack, method);
-  const key = bonus > 0 ? "packs.item.bonus" : "packs.item.plain";
-  return t(key, { sparks: sparks(sparksOf(pack, method)), bonus: num(bonus) });
 }
 
 // ── help ─────────────────────────────────────────────────────────────────────

@@ -3,7 +3,6 @@ import type { Screen } from "./screens";
 import { bot } from "./telegram";
 import { getHubId, setHubId, takeHubId } from "./store";
 
-
 /**
  * Весь интерфейс бота — одно сообщение, которое редактируется.
  * Чат не растёт, человек смотрит в одну точку.
