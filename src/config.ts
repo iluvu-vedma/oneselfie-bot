@@ -203,6 +203,13 @@ export const FAILS_BEFORE_ALERT = 3;
 export const BOT_TOKEN = process.env.BOT_TOKEN ?? "";
 export const KIE_API_KEY = process.env.KIE_API_KEY ?? "";
 export const KIE_BASE_URL = process.env.KIE_BASE_URL ?? "https://api.kie.ai";
+/**
+ * File Upload API kie.ai живёт на отдельном хосте — это не то же самое, что
+ * api.kie.ai для задач генерации. Перепутаешь — /api/file-base64-upload
+ * отдаёт 404, потому что на api.kie.ai его нет.
+ */
+export const KIE_UPLOAD_BASE_URL =
+  process.env.KIE_UPLOAD_BASE_URL ?? "https://kieai.redpandaai.co";
 /** Публичный https-адрес деплоя, без слеша на конце. */
 export const PUBLIC_URL = (process.env.PUBLIC_URL ?? "").replace(/\/+$/, "");
 /** Секрет для /api/kie-callback и /api/sweep. Без него эндпоинты открыты всему интернету. */
