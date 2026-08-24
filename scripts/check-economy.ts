@@ -24,7 +24,6 @@ import {
   STAR_PAYOUT_USD,
   STAR_PRICE_RUB,
   USD_RUB,
-  bonusOf,
   priceOf,
   sparksOf,
 } from "../src/config";

@@ -282,10 +282,9 @@ for (const m of PAY_METHOD_ORDER) {
 }
 
 console.log("\n── Тосты " + "─".repeat(66));
-for (const key of ["soon", "needModel", "noPhotoModel", "busy", "reset", "error"]) {
+for (const key of ["soon", "needModel", "noPhotoModel", "reset", "error"]) {
   console.log(`  ${t(`toast.${key}`)}`);
 }
-console.log(`  ${t("toast.needSparks", { amount: sparks(MODELS.nbpro.price) })}`);
 console.log(`  ${t("toast.invoice", { price: "500 ⭐" })}`);
 console.log(`  ${t("invoice.expired")}`);
 
