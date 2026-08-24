@@ -1,10 +1,11 @@
 import {
   KIE_API_KEY,
   KIE_BASE_URL,
-  MODEL,
+  MODELS,
   MODEL_ASPECT_RATIO,
   MODEL_OUTPUT_FORMAT,
   MODEL_RESOLUTION,
+  ModelId,
 } from "./config";
 
 function headers(): Record<string, string> {
@@ -53,8 +54,14 @@ export async function uploadImage(
   return String(url);
 }
 
-/** Ставит задачу в очередь. Синхронно ждать картинку внутри вебхука невозможно. */
+/**
+ * Ставит задачу в очередь. Синхронно ждать картинку внутри вебхука невозможно.
+ *
+ * Без референсов `image_input` не отправляется вовсе: пустой массив некоторые
+ * модели принимают за «работай по картинке» и отдают мусор.
+ */
 export async function createTask(
+  model: ModelId,
   prompt: string,
   imageUrls: string[],
   callBackUrl: string
@@ -63,11 +70,11 @@ export async function createTask(
     method: "POST",
     headers: headers(),
     body: JSON.stringify({
-      model: MODEL,
+      model: MODELS[model].kieId,
       callBackUrl,
       input: {
         prompt,
-        image_input: imageUrls,
+        ...(imageUrls.length > 0 ? { image_input: imageUrls } : {}),
         aspect_ratio: MODEL_ASPECT_RATIO,
         resolution: MODEL_RESOLUTION,
         output_format: MODEL_OUTPUT_FORMAT,

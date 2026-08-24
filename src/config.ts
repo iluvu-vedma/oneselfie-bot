@@ -1,63 +1,186 @@
 /**
  * OneSelfie — единственный файл с константами.
- * Смена модели, курса, цен и пакетов правится ТОЛЬКО здесь.
+ * Модели, курс, цены и пакеты правятся ТОЛЬКО здесь.
+ * Экраны собираются из этих таблиц, руками список нигде не дублируется.
  */
 
 // ── Валюта ───────────────────────────────────────────────────────────────────
-/** Название валюты. Запасные варианты: вспышки, люмены, блики. */
-export const CURRENCY_NAME = "искры";
+/** Значок валюты. Склонения живут в locales/ru.json, ключ `unit.spark`. */
 export const CURRENCY_EMOJI = "✨";
-/** Склонения названия валюты: 1 искра / 2 искры / 5 искр. */
-export const CURRENCY_FORMS: [string, string, string] = ["искра", "искры", "искр"];
 
-/** Цена одного кадра. Единственная трата в MVP. */
-export const SPARKS_PER_IMAGE = 12;
+// ── Модели ───────────────────────────────────────────────────────────────────
+export type ModelId = "nbpro" | "sd5" | "nb2" | "gpt2";
 
-// ── Модель и себестоимость ───────────────────────────────────────────────────
-/** id модели в kie. Компромисс цены и качества. */
-export const MODEL = "nano-banana-2";
+export interface ModelInfo {
+  id: ModelId;
+  /**
+   * Что уходит в kie. ПРОВЕРИТЬ ПО КАТАЛОГУ kie ПЕРЕД ЗАПУСКОМ: из четырёх
+   * слагов в бою жил только `nano-banana-2`. Неверный слаг — createTask падает
+   * и искры возвращаются сами, но модель не работает.
+   */
+  kieId: string;
+  icon: string;
+  /** Цена кадра в искрах. Лестница 10-12-15-20 посчитана в docs/interface-v2.md §2б. */
+  price: number;
+  /** Прайс kie за кадр 2K, $. Нужен только check-economy и /stats. */
+  costUsd: number;
+  /** Принимает ли референс-фото. false — кнопка «Использовать моё фото» не рисуется. */
+  photo: boolean;
+}
+
+export const MODELS: Record<ModelId, ModelInfo> = {
+  nbpro: { id: "nbpro", kieId: "nano-banana-pro", icon: "🍌", price: 20, costUsd: 0.09, photo: true },
+  sd5: { id: "sd5", kieId: "seedream-5-pro", icon: "🌱", price: 15, costUsd: 0.07, photo: true },
+  nb2: { id: "nb2", kieId: "nano-banana-2", icon: "🍌", price: 12, costUsd: 0.06, photo: true },
+  gpt2: { id: "gpt2", kieId: "gpt-image-2", icon: "🧠", price: 10, costUsd: 0.05, photo: true },
+};
+
+/**
+ * Порядок на экране — по убыванию цены. Это не список сумм (там «по возрастанию»),
+ * а выбор инструмента: дорогая первой работает якорем, остальные читаются
+ * как «а можно и дешевле».
+ */
+export const MODEL_ORDER: ModelId[] = ["nbpro", "sd5", "nb2", "gpt2"];
+
+/**
+ * Синяя кнопка на экране выбора. Не флагман: первый кадр новичка не должен
+ * стоить 20 ✨ — если сходство не понравится, человек уйдёт.
+ */
+export const PRIMARY_MODEL: ModelId = "nb2";
+
+export function isModelId(v: unknown): v is ModelId {
+  return typeof v === "string" && Object.prototype.hasOwnProperty.call(MODELS, v);
+}
+
+/** Самая дешёвая и самая дорогая: «кадр от N ✨» и разброс кадров на экранах оплаты. */
+export const CHEAPEST_MODEL: ModelId = MODEL_ORDER.reduce((a, b) =>
+  MODELS[a].price <= MODELS[b].price ? a : b
+);
+export const DEAREST_MODEL: ModelId = MODEL_ORDER.reduce((a, b) =>
+  MODELS[a].price >= MODELS[b].price ? a : b
+);
+/** Порог входа: «Кадр — от 10 ✨». */
+export const MIN_PRICE = MODELS[CHEAPEST_MODEL].price;
+
+// ── Параметры генерации ──────────────────────────────────────────────────────
 /** Разрешение: "1K" | "2K" | "4K". Понижение до 1K — рычаг на случай плохой выплаты. */
 export const MODEL_RESOLUTION = "2K";
+/** Продукт про людей, поэтому портрет. Выбора соотношения в интерфейсе нет. */
 export const MODEL_ASPECT_RATIO = "3:4";
 export const MODEL_OUTPUT_FORMAT = "jpg";
 
-/** Прайс kie, колонка «Our Price». */
-export const IMG_COST_USD = 0.06;
 /** +10% на брак и повторы. */
 export const RETRY_OVERHEAD = 1.1;
-/** Сколько реально доходит до владельца с одной звезды. ПРОВЕРИТЬ НА ЖИВОЙ ВЫПЛАТЕ. */
+/** Сколько реально доходит до владельца с одной звезды. Подтверждено: $13 / 1000 ⭐. */
 export const STAR_PAYOUT_USD = 0.013;
 /** Цена звезды для пользователя, ₽. Только для прикидок. */
 export const STAR_PRICE_RUB = 1.99;
+/** Курс искры в рублях. На нём стоит вся таблица пакетов. */
+export const SPARK_PRICE_RUB = 1.5;
 /** Только для прикидок. */
 export const USD_RUB = 85;
+/** Ставка эквайринга рублёвого рельса. Провайдер не выбран — число предварительное. */
+export const ACQUIRING_FEE = 0.05;
+/** Комиссия крипто-рельса. */
+export const CRYPTO_FEE = 0.01;
 
-// ── Пакеты ───────────────────────────────────────────────────────────────────
-export type PackageId = "probe" | "set" | "big";
+// ── Платёжные рельсы ─────────────────────────────────────────────────────────
+export type PayMethod = "sbp" | "card" | "stars" | "crypto";
 
-export interface SparkPackage {
-  id: PackageId;
-  /** Имя в счёте Telegram и в /stats. Считается кадрами: sparks / SPARKS_PER_IMAGE. */
-  title: string;
-  /** Сколько звёзд платит пользователь. */
-  stars: number;
-  /** Сколько искр зачисляется (включая бонус). Делится на SPARKS_PER_IMAGE нацело. */
-  sparks: number;
-  /** Бонусные искры, уже входят в sparks. На кнопке не пишутся — см. paywallKeyboard. */
-  bonus: number;
+export interface PayMethodInfo {
+  id: PayMethod;
+  icon: string;
+  /** Единица, в которой человек платит: ₽, ⭐, USDT. */
+  unit: string;
+  /**
+   * Работает ли рельс прямо сейчас. Мёртвый отдаёт тост «скоро» и экран пакетов
+   * не открывает: кнопка, ведущая в никуда, хуже отсутствующей. Внешний
+   * эквайринг не подключён — живут пока только звёзды.
+   */
+  live: boolean;
 }
 
-export const PACKAGES: Record<PackageId, SparkPackage> = {
-  probe: { id: "probe", title: "5 кадров", stars: 60, sparks: 60, bonus: 0 },
-  set: { id: "set", title: "15 кадров", stars: 170, sparks: 180, bonus: 10 },
-  big: { id: "big", title: "30 кадров", stars: 330, sparks: 360, bonus: 30 },
+export const PAY_METHODS: Record<PayMethod, PayMethodInfo> = {
+  sbp: { id: "sbp", icon: "🏦", unit: "₽", live: false },
+  card: { id: "card", icon: "💳", unit: "₽", live: false },
+  stars: { id: "stars", icon: "⭐", unit: "⭐", live: true },
+  crypto: { id: "crypto", icon: "₿", unit: "USDT", live: false },
 };
 
-export const PACKAGE_ORDER: PackageId[] = ["probe", "set", "big"];
+/** Порядок на экране: сначала рубли — только они дают оборотные деньги сразу. */
+export const PAY_METHOD_ORDER: PayMethod[] = ["sbp", "card", "stars", "crypto"];
+
+/**
+ * Зелёная — одна, и это первый ЖИВОЙ рельс: четыре зелёные кнопки не сигнал,
+ * а фон, а зелень на «скоро» — обещание, которого бот не держит.
+ * Включится СБП — зелёный уедет туда сам.
+ */
+export const RECOMMENDED_METHOD: PayMethod | undefined = PAY_METHOD_ORDER.find(
+  (m) => PAY_METHODS[m].live
+);
+
+// ── Пакеты ───────────────────────────────────────────────────────────────────
+/**
+ * Пакет один на все рельсы, каждый рисует свою цену за одно и то же число искр.
+ * Базовый размен везде 1 ✨ = 1 ⭐ = 1,5 ₽, бонус — сверху и в подарок,
+ * а не другой курс.
+ *
+ * Потолок бонуса на звёздах +10% против +20% на рублях: при +20% нетто падает
+ * до $0,0108 за искру и самая дешёвая модель пробивает правило 50%.
+ */
+export interface Pack {
+  /** 1..4, он же параметр в callback_data: `buy:stars:3`. */
+  tier: number;
+  /** Искры без бонуса. */
+  base: number;
+  rub: number;
+  usdt: number;
+  stars: number;
+  /** Бонус в процентах: рубли и крипта. */
+  bonusFiat: number;
+  /** Бонус в процентах: звёзды. */
+  bonusStars: number;
+}
+
+export const PACKS: Pack[] = [
+  { tier: 1, base: 200, rub: 300, usdt: 4, stars: 200, bonusFiat: 0, bonusStars: 0 },
+  { tier: 2, base: 500, rub: 750, usdt: 9, stars: 500, bonusFiat: 10, bonusStars: 10 },
+  { tier: 3, base: 1000, rub: 1500, usdt: 18, stars: 1000, bonusFiat: 15, bonusStars: 10 },
+  { tier: 4, base: 2000, rub: 3000, usdt: 35, stars: 2000, bonusFiat: 20, bonusStars: 10 },
+];
+
+export function findPack(tier: number): Pack | undefined {
+  return PACKS.find((p) => p.tier === tier);
+}
+
+/** Сколько человек платит за пакет на этом рельсе. */
+export function priceOf(pack: Pack, method: PayMethod): number {
+  if (method === "stars") return pack.stars;
+  if (method === "crypto") return pack.usdt;
+  return pack.rub;
+}
+
+/** Бонус в процентах на этом рельсе. */
+export function bonusOf(pack: Pack, method: PayMethod): number {
+  return method === "stars" ? pack.bonusStars : pack.bonusFiat;
+}
+
+/** Сколько искр зачислится. Считается из базы и бонуса — числа не могут разъехаться. */
+export function sparksOf(pack: Pack, method: PayMethod): number {
+  return Math.round(pack.base * (1 + bonusOf(pack, method) / 100));
+}
 
 // ── Загрузка селфи ───────────────────────────────────────────────────────────
-export const MIN_PHOTOS = 1;
+/** Одного селфи уже достаточно, поэтому отдельного шага «Готово» в потоке нет. */
 export const MAX_PHOTOS = 4;
+
+// ── Промпт ───────────────────────────────────────────────────────────────────
+/** Короче — почти наверняка случайное сообщение, а не описание кадра. */
+export const MIN_PROMPT_LEN = 3;
+/** Длиннее модели всё равно не читают целиком. */
+export const MAX_PROMPT_LEN = 2000;
+/** Лимит подписи Telegram. Промпт длиннее уезжает вторым сообщением. */
+export const CAPTION_LIMIT = 1024;
 
 // ── Тайминги ─────────────────────────────────────────────────────────────────
 /** Через сколько секунд аварийный крон начинает добирать результат через recordInfo. */
@@ -87,13 +210,28 @@ export const CALLBACK_SECRET = process.env.CALLBACK_SECRET ?? "";
 /** Секрет вебхука Telegram (X-Telegram-Bot-Api-Secret-Token). */
 export const TELEGRAM_WEBHOOK_SECRET = process.env.TELEGRAM_WEBHOOK_SECRET ?? "";
 export const OWNER_CHAT_ID = process.env.OWNER_CHAT_ID ?? "";
-/** Картинка-пример: сетка реальных результатов. Если пусто — шаг 2 уходит текстом. */
+/** Картинка-пример: сетка реальных результатов. Если пусто — старт уходит текстом. */
 export const EXAMPLE_IMAGE_URL = process.env.EXAMPLE_IMAGE_URL ?? "";
 
-// ── Промпт ───────────────────────────────────────────────────────────────────
 /**
- * Преамбула про сходство. Это самое хрупкое место продукта:
- * если Шаг 0 показал непохожесть — крутится в первую очередь она.
+ * Внешние ссылки. Пустая — кнопка просто не рисуется:
+ * кнопка, ведущая в никуда, хуже отсутствующей.
+ */
+function link(value: string | undefined): string {
+  const url = (value ?? "").trim();
+  return /^https:\/\/\S+$/.test(url) ? url : "";
+}
+/** Новости продукта. Кнопка на home, последней перед «Назад». */
+export const CHANNEL_URL = link(process.env.CHANNEL_URL);
+/** Канал с промптами. Кнопка там, где человек завис над пустым полем ввода. */
+export const PROMPTS_CHANNEL_URL = link(process.env.PROMPTS_CHANNEL_URL);
+/** Куда писать, если сломалось. Строка в справке появляется только вместе с адресом. */
+export const SUPPORT_URL = link(process.env.SUPPORT_URL);
+
+// ── Промпт для режима «моё фото» ─────────────────────────────────────────────
+/**
+ * Преамбула про сходство. Приклеивается только когда есть референс-фото:
+ * в режиме «словами» лица нет и держать нечего.
  */
 export const PROMPT_PREFIX =
   "Photorealistic photograph of the exact person shown in the reference images. " +
@@ -102,5 +240,5 @@ export const PROMPT_PREFIX =
   "must be unmistakably the same individual. Do not beautify, slim, de-age or stylise the face.";
 
 export const PROMPT_SUFFIX =
-  "Natural skin texture with visible pores, sharp focus on the eyes, 85mm lens, shallow depth of field, " +
-  "professional colour grading. No text, no logo, no watermark, no extra people, no distorted hands.";
+  "Natural skin texture with visible pores, sharp focus on the eyes, professional colour grading. " +
+  "No text, no logo, no watermark, no extra people, no distorted hands.";

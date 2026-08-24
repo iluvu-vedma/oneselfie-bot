@@ -1,87 +1,141 @@
 import { Context } from "grammy";
-import { CALLBACK_SECRET, PUBLIC_URL, SPARKS_PER_IMAGE } from "./config";
-import { draw, drawHere, move } from "./hub";
+import {
+  CALLBACK_SECRET,
+  MODELS,
+  ModelId,
+  PUBLIC_URL,
+  PayMethod,
+} from "./config";
+import * as hub from "./hub";
 import { t } from "./i18n";
 import { createTask } from "./kie";
 import { bump } from "./kv";
 import { notifyOwner } from "./owner";
-import { buildPrompt } from "./scenes";
+import { buildPrompt } from "./prompt";
 import * as screens from "./screens";
-import { HomeStage, HomeState } from "./screens";
+import type { Notice, Screen } from "./screens";
 import { bot } from "./telegram";
-import {
-  acquireGenLock,
-  createTaskRecord,
-  credit,
-  getBalance,
-  getPhotos,
-  getUser,
-  isGenerating,
-  markPaywallShown,
-  nextSceneIndex,
-  photoCount,
-  releaseGenLock,
-  trySpend,
-} from "./store";
-import { sparks } from "./ui";
-
-/** Разовая строка о том, что только что произошло. Часть состояния экрана, не «дописка сверху». */
-export interface Notice {
-  notice?: string;
-}
+import * as store from "./store";
+import { Origin, originOf, sparks } from "./ui";
 
 /**
- * Состояние экрана целиком выводится из KV — ни одного флага «где мы сейчас».
- * Поэтому `home` можно нарисовать в любой момент: после оплаты, после кадра,
- * из аварийного крона, спустя сутки. Результат будет один и тот же.
+ * Слой между состоянием и экранами. Экран — чистая функция, состояние живёт
+ * в KV, а здесь только одно: по какому адресу что рисовать.
  */
-export async function homeState(chatId: number, extra: Notice = {}): Promise<HomeState> {
-  const [user, photos, balance, busy] = await Promise.all([
-    getUser(chatId),
-    photoCount(chatId),
-    getBalance(chatId),
-    isGenerating(chatId),
+export type Ref =
+  | { id: "home" }
+  | { id: "models" }
+  | { id: "model"; model: ModelId }
+  | { id: "upload" }
+  | { id: "prompt" }
+  | { id: "describe" }
+  | { id: "busy" }
+  | { id: "topup"; from: Origin }
+  | { id: "packs"; method: PayMethod; from: Origin }
+  | { id: "help" }
+  | { id: "earn" };
+
+/**
+ * Собирает экран целиком из KV. Отдельного флага «где мы сейчас» нет: адрес
+ * приходит снаружи, всё остальное выводится из данных.
+ *
+ * Три правила, которые тут и живут:
+ *   — идёт генерация → экраны воронки показывают busy, что бы ни было выбрано;
+ *   — модель не выбрана → воронки не существует, возвращаем выбор модели;
+ *   — есть фото → это уже экран промпта, нет → экран загрузки.
+ */
+export async function render(chatId: number, ref: Ref, extra: Notice = {}): Promise<Screen> {
+  const [user, balance, photos, generating] = await Promise.all([
+    store.getUser(chatId),
+    store.getBalance(chatId),
+    store.photoCount(chatId),
+    store.isGenerating(chatId),
   ]);
+  const notice = extra.notice;
 
-  let stage: HomeStage;
-  if (busy) stage = "busy";
-  else if (photos === 0) stage = "start";
-  else if (balance < SPARKS_PER_IMAGE) stage = "need";
-  else stage = "ready";
+  switch (ref.id) {
+    case "home":
+      return screens.home({ balance, name: user.name, notice });
+    case "models":
+      return screens.models({ balance, notice });
+    case "help":
+      return screens.help({ notice });
+    case "earn":
+      return screens.earn({ notice });
+    case "topup":
+      return screens.topup({ balance, from: ref.from, notice });
+    case "packs":
+      return screens.packs({ balance, method: ref.method, from: ref.from, notice });
+  }
 
-  return { stage, balance, photos, name: user.name, notice: extra.notice };
+  const model = ref.id === "model" ? ref.model : user.model;
+  if (model === null) return screens.models({ balance, notice });
+  if (generating) {
+    return screens.busy({ model, balance, cost: MODELS[model].price, notice });
+  }
+
+  switch (ref.id) {
+    case "model":
+      return screens.model({ model, balance, notice });
+    case "describe":
+      return screens.describe({ model, balance, notice });
+    case "upload":
+    case "prompt":
+      return photos > 0
+        ? screens.prompt({ model, balance, photos, notice })
+        : screens.upload({ model, balance, notice });
+    case "busy":
+      // Замка нет — кадр уже приехал. Экран «сделать ещё» и есть результат.
+      return screens.model({ model, balance, notice });
+  }
 }
 
-/** Перерисовать экран на месте. */
-export async function drawHome(chatId: number, extra: Notice = {}): Promise<void> {
-  await draw(chatId, screens.home(await homeState(chatId, extra)));
+/** Перерисовать экран на месте. Вызывается там, где ctx недоступен: коллбэк kie, крон. */
+export async function draw(chatId: number, ref: Ref, extra: Notice = {}): Promise<void> {
+  await hub.draw(chatId, await render(chatId, ref, extra));
 }
 
 /** Перерисовать то сообщение, на котором нажали кнопку. */
-export async function drawHomeHere(ctx: Context, extra: Notice = {}): Promise<void> {
-  const chatId = ctx.chat!.id;
-  await drawHere(ctx, screens.home(await homeState(chatId, extra)));
+export async function drawHere(ctx: Context, ref: Ref, extra: Notice = {}): Promise<void> {
+  await hub.drawHere(ctx, await render(ctx.chat!.id, ref, extra));
 }
 
-/** Перенести экран вниз: в ленте появился новый объект — кадр, чек, селфи. */
-export async function moveHome(chatId: number, extra: Notice = {}): Promise<void> {
-  await move(chatId, screens.home(await homeState(chatId, extra)));
+/** Перенести экран вниз: в ленте появился новый объект — кадр, чек, подарок. */
+export async function move(chatId: number, ref: Ref, extra: Notice = {}): Promise<void> {
+  await hub.move(chatId, await render(chatId, ref, extra));
 }
 
-export async function drawPaywall(chatId: number): Promise<void> {
-  await countPaywall(chatId);
-  await draw(chatId, screens.paywall(await getBalance(chatId)));
+/** Экран, с которого человек ушёл в пополнение. Читается после оплаты. */
+export async function originRef(chatId: number): Promise<Ref> {
+  const from = originOf((await store.getUser(chatId)).topupFrom);
+  if (from === "home") return { id: "home" };
+  if (from === "models") return { id: "models" };
+  return { id: "model", model: from };
 }
 
-export async function drawPaywallHere(ctx: Context): Promise<void> {
-  const chatId = ctx.chat!.id;
-  await countPaywall(chatId);
-  await drawHere(ctx, screens.paywall(await getBalance(chatId)));
+/** Куда возвращаться из экрана модели, если модель уже выбрана. */
+export async function modelRef(chatId: number): Promise<Ref> {
+  const model = await store.getModel(chatId);
+  return model === null ? { id: "models" } : { id: "model", model };
 }
 
-async function countPaywall(chatId: number): Promise<void> {
-  await bump("paywall_views");
-  if (await markPaywallShown(chatId)) await bump("paywall_shown");
+/**
+ * Где человек стоит сейчас. Нужно там, где адрес не приходит с кнопкой:
+ * пришло сообщение, и перерисовать надо тот экран, с которого его написали.
+ */
+export async function currentRef(chatId: number): Promise<Ref> {
+  const user = await store.getUser(chatId);
+  if (user.model === null) return { id: "home" };
+  if (await store.isGenerating(chatId)) return { id: "busy" };
+  if (user.source === "text") return { id: "describe" };
+  // render сам выберет между upload и prompt по числу фотографий.
+  if (user.source === "photo") return { id: "prompt" };
+  return { id: "model", model: user.model };
+}
+
+export async function countTopup(chatId: number): Promise<void> {
+  await bump("topup_views");
+  if (await store.markTopupShown(chatId)) await bump("topup_shown");
 }
 
 function callbackUrl(): string {
@@ -93,43 +147,61 @@ function callbackUrl(): string {
 /**
  * Порядок важен: замок → списание → экран «идёт работа» → запрос в kie.
  *
- * Списываем ДО обращения к kie, иначе два быстрых тапа дают два кадра за одно
- * списание. Экран перерисовывается до `createTask`, а не после: сетевой запрос
- * занимает секунду, и всю эту секунду человек не должен смотреть в тишину.
+ * Списываем ДО обращения к kie, иначе два быстрых сообщения дают два кадра за
+ * одно списание. Экран перерисовывается до `createTask`, а не после: сетевой
+ * запрос занимает секунду, и всю эту секунду человек не должен смотреть в тишину.
  */
-export async function startGeneration(chatId: number): Promise<void> {
-  const photos = await getPhotos(chatId);
-  if (photos.length === 0) return drawHome(chatId);
-
-  const lock = await acquireGenLock(chatId);
-  // Замка нет — кадр уже готовится. Экран сам это покажет: стадия читается из замка.
-  if (!lock) return drawHome(chatId);
-
-  const balanceAfter = await trySpend(chatId, SPARKS_PER_IMAGE);
-  if (balanceAfter === null) {
-    await releaseGenLock(chatId, lock);
-    return drawPaywall(chatId);
+export async function startGeneration(chatId: number, userPrompt: string): Promise<void> {
+  const user = await store.getUser(chatId);
+  const model = user.model;
+  if (model === null) {
+    return draw(chatId, { id: "models" }, { notice: t("notice.needModel") });
   }
 
-  await drawHome(chatId);
-  await bot.api.sendChatAction(chatId, "upload_photo").catch(() => {});
+  // Источник выбран человеком: в режиме «словами» фото игнорируются, даже если
+  // они лежат в состоянии с прошлого кадра.
+  const photos = user.source === "photo" ? await store.getPhotos(chatId) : [];
+  if (user.source === "photo" && photos.length === 0) {
+    return draw(chatId, { id: "upload" }, { notice: t("notice.needPhoto") });
+  }
 
-  const sceneIndex = await nextSceneIndex(chatId);
+  const lock = await store.acquireGenLock(chatId);
+  // Замка нет — кадр уже готовится. Экран сам это покажет: стадия читается из замка.
+  if (!lock) return draw(chatId, { id: "busy" });
+
+  const cost = MODELS[model].price;
+  const balanceAfter = await store.trySpend(chatId, cost);
+  if (balanceAfter === null) {
+    await store.releaseGenLock(chatId, lock);
+    await store.setTopupFrom(chatId, model);
+    await countTopup(chatId);
+    return draw(
+      chatId,
+      { id: "topup", from: model },
+      { notice: t("notice.needSparks", { amount: sparks(cost) }) }
+    );
+  }
+
+  await draw(chatId, { id: "busy" });
+  await bot.api.sendChatAction(chatId, "upload_photo").catch(() => {});
 
   let taskId: string;
   try {
-    taskId = await createTask(buildPrompt(sceneIndex), photos, callbackUrl());
+    taskId = await createTask(model, buildPrompt(userPrompt, photos.length > 0), photos, callbackUrl());
   } catch (e) {
     // До kie не дошло — возвращаем ровно то, что сняли, и отпускаем замок.
-    await credit(chatId, SPARKS_PER_IMAGE);
-    await releaseGenLock(chatId, lock);
+    await store.credit(chatId, cost);
+    await store.releaseGenLock(chatId, lock);
     await bump("gen_failed");
-    await bump("sparks_refunded", SPARKS_PER_IMAGE);
-    await notifyOwner(`createTask упал у ${chatId}: ${String(e)}`);
-    return drawHome(chatId, {
-      notice: t("home.notice.startFailed", { amount: sparks(SPARKS_PER_IMAGE) }),
-    });
+    await bump("sparks_refunded", cost);
+    await notifyOwner(`createTask (${model}) упал у ${chatId}: ${String(e)}`);
+    return draw(
+      chatId,
+      { id: "model", model },
+      { notice: t("notice.startFailed", { amount: sparks(cost) }) }
+    );
   }
 
-  await createTaskRecord(taskId, chatId, sceneIndex, SPARKS_PER_IMAGE, lock);
+  await store.createTaskRecord(taskId, chatId, model, userPrompt, cost, lock);
+  await bump(`gen_${model}`);
 }

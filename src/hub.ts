@@ -99,13 +99,3 @@ export async function move(chatId: number, screen: Screen): Promise<void> {
   }
   await send(chatId, screen);
 }
-
-/**
- * Запомнить сообщение с нажатой кнопкой как текущий экран, ничего не перерисовывая.
- * Нужно там, где рисовать будет уже не обработчик, а долгая операция.
- */
-export async function adopt(ctx: Context): Promise<void> {
-  const chatId = ctx.chat?.id;
-  const messageId = ctx.callbackQuery?.message?.message_id;
-  if (chatId !== undefined && messageId !== undefined) await setHubId(chatId, messageId);
-}
