@@ -68,6 +68,11 @@ export const TIMEOUT_SEC = 5 * 60;
 export const TASK_TTL_SEC = 60 * 60;
 /** Блокировка от двойного тапа. Чуть больше таймаута, чтобы возврат успел снять её сам. */
 export const GEN_LOCK_TTL_SEC = TIMEOUT_SEC + 60;
+/**
+ * Сколько живёт message_id экрана. Чуть меньше 48 часов — после этого срока
+ * Telegram всё равно не даёт ни редактировать, ни удалять сообщение.
+ */
+export const HUB_TTL_SEC = 47 * 60 * 60;
 /** Сколько неудач подряд, прежде чем бот сам предложит возврат денег. */
 export const FAILS_BEFORE_ALERT = 3;
 

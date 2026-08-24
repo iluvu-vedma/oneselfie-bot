@@ -1,4 +1,5 @@
 import { BOT_TOKEN, PUBLIC_URL, TELEGRAM_WEBHOOK_SECRET } from "../src/config";
+import { t } from "../src/i18n";
 
 async function main() {
   if (!BOT_TOKEN) throw new Error("BOT_TOKEN is unset");
@@ -24,9 +25,9 @@ async function main() {
   console.log(
     await call("setMyCommands", {
       commands: [
-        { command: "start", description: "Показать, что делать дальше" },
-        { command: "balance", description: "Баланс искр и покупка" },
-        { command: "new", description: "Заменить селфи" },
+        { command: "start", description: t("command.start") },
+        { command: "balance", description: t("command.balance") },
+        { command: "new", description: t("command.new") },
       ],
     })
   );
