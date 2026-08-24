@@ -1,6 +1,7 @@
 import {
   KIE_API_KEY,
   KIE_BASE_URL,
+  KIE_UPLOAD_BASE_URL,
   MODELS,
   MODEL_ASPECT_RATIO,
   MODEL_OUTPUT_FORMAT,
@@ -16,8 +17,12 @@ function headers(): Record<string, string> {
   };
 }
 
-async function kieFetch(path: string, init: RequestInit): Promise<any> {
-  const res = await fetch(`${KIE_BASE_URL}${path}`, init);
+async function kieFetch(
+  path: string,
+  init: RequestInit,
+  baseUrl = KIE_BASE_URL
+): Promise<any> {
+  const res = await fetch(`${baseUrl}${path}`, init);
   const text = await res.text();
   let body: any;
   try {
@@ -40,15 +45,19 @@ export async function uploadImage(
   fileName: string,
   uploadPath = "oneselfie/refs"
 ): Promise<string> {
-  const body = await kieFetch("/api/file-base64-upload", {
-    method: "POST",
-    headers: headers(),
-    body: JSON.stringify({
-      base64Data: bytes.toString("base64"),
-      uploadPath,
-      fileName,
-    }),
-  });
+  const body = await kieFetch(
+    "/api/file-base64-upload",
+    {
+      method: "POST",
+      headers: headers(),
+      body: JSON.stringify({
+        base64Data: bytes.toString("base64"),
+        uploadPath,
+        fileName,
+      }),
+    },
+    KIE_UPLOAD_BASE_URL
+  );
   const url = body?.data?.downloadUrl;
   if (!url) throw new Error("kie upload: нет downloadUrl");
   return String(url);
