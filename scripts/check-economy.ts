@@ -1,19 +1,33 @@
 /**
- * Самопроверка экономики и пейволла. Гоняется без сети и без KV.
- * Ловит ровно те пункты приёмки, которые можно проверить арифметикой.
+ * Самопроверка экономики. Гоняется без сети и без KV.
+ *
+ * Здесь таблицы из docs/interface-v2.md §2б и §6 становятся исполняемыми:
+ * если кто-то поправит цену модели, бонус пакета или курс — проверка скажет,
+ * какое правило сломалось, а не оставит это на потом.
  */
 import {
-  IMG_COST_USD,
-  PACKAGES,
-  PACKAGE_ORDER,
+  ACQUIRING_FEE,
+  CHEAPEST_MODEL,
+  CRYPTO_FEE,
+  DEAREST_MODEL,
+  MIN_PRICE,
+  MODELS,
+  MODEL_ORDER,
+  PACKS,
+  PAY_METHODS,
+  PAY_METHOD_ORDER,
+  PRIMARY_MODEL,
+  Pack,
+  PayMethod,
   RETRY_OVERHEAD,
-  SPARKS_PER_IMAGE,
+  SPARK_PRICE_RUB,
   STAR_PAYOUT_USD,
   STAR_PRICE_RUB,
   USD_RUB,
+  bonusOf,
+  priceOf,
+  sparksOf,
 } from "../src/config";
-import { SCENES } from "../src/scenes";
-import { frames, framesFor, paywallKeyboard } from "../src/ui";
 
 let failed = 0;
 function check(ok: boolean, label: string) {
@@ -21,56 +35,123 @@ function check(ok: boolean, label: string) {
   if (!ok) failed++;
 }
 
-const imgCost = IMG_COST_USD * RETRY_OVERHEAD;
-console.log(`Себестоимость кадра: $${imgCost.toFixed(3)} (${(imgCost * USD_RUB).toFixed(1)} ₽)`);
-const minStars = (2 * imgCost) / STAR_PAYOUT_USD;
-console.log(`Минимум звёзд за кадр по правилу 50%: ${minStars.toFixed(1)}`);
-check(SPARKS_PER_IMAGE >= minStars, `SPARKS_PER_IMAGE=${SPARKS_PER_IMAGE} не ниже минимума`);
-check(SCENES.length === 30, `сценариев в пуле: ${SCENES.length}`);
-console.log("");
-
-console.log("Пакет        ⭐    ✨   кадров  ⭐/кадр   нетто   с/с    доля");
-for (const id of PACKAGE_ORDER) {
-  const p = PACKAGES[id];
-  const n = p.sparks / SPARKS_PER_IMAGE;
-  const netto = p.stars * STAR_PAYOUT_USD;
-  const cost = n * imgCost;
-  const share = cost / netto;
-  console.log(
-    `${p.title.padEnd(10)} ${String(p.stars).padStart(4)} ${String(p.sparks).padStart(5)} ` +
-      `${String(n).padStart(6)}  ${(p.stars / n).toFixed(1).padStart(6)} ` +
-      ` $${netto.toFixed(2)}  $${cost.toFixed(2)}  ${(share * 100).toFixed(0)}%` +
-      `   (${(p.stars * STAR_PRICE_RUB).toFixed(0)} ₽ юзеру)`
-  );
-  check(Number.isInteger(n), `${p.title}: ${p.sparks} ✨ делится на ${SPARKS_PER_IMAGE} нацело`);
-  check(share <= 0.5, `${p.title}: себестоимость ${(share * 100).toFixed(0)}% ≤ 50%`);
-  check(p.sparks === p.stars + p.bonus, `${p.title}: бонус сходится (${p.stars}+${p.bonus})`);
-  // title попадает в счёт Telegram и в /stats. Он врёт, как только сдвинется цена кадра.
-  check(p.title === frames(framesFor(p.sparks)), `${p.title}: название совпадает с кадрами`);
+/** Сколько долларов реально доходит до владельца с одного пакета на этом рельсе. */
+function netto(pack: Pack, method: PayMethod): number {
+  const price = priceOf(pack, method);
+  if (method === "stars") return price * STAR_PAYOUT_USD;
+  if (method === "crypto") return price * (1 - CRYPTO_FEE);
+  return (price / USD_RUB) * (1 - ACQUIRING_FEE);
 }
-console.log("");
 
-console.log("Кнопки пейволла:");
-// Последний ряд — «Назад», он не про деньги и под проверку состава не попадает.
-const payRows = paywallKeyboard().inline_keyboard.slice(0, PACKAGE_ORDER.length);
-check(payRows.length === PACKAGE_ORDER.length, `пакетов на пейволле: ${payRows.length}`);
-for (const row of payRows) {
-  for (const btn of row) {
-    const text = (btn as { text: string }).text;
-    console.log(`  ${text}`);
-    check(/✨/.test(text) && /кадр/.test(text), "на кнопке есть и искры, и кадры");
-    check(text.length <= 30, `кнопка «${text}» — ${text.length} символов, лимит 30`);
+/** Выручка в долларах за одну искру — то, из чего считается цена кадра. */
+function perSpark(pack: Pack, method: PayMethod): number {
+  return netto(pack, method) / sparksOf(pack, method);
+}
+
+// ── Рельсы ───────────────────────────────────────────────────────────────────
+
+console.log("Нетто за 1 ✨ по рельсам и пакетам, $\n");
+console.log("рельс     пакет 1   пакет 2   пакет 3   пакет 4    худший");
+let worst = Infinity;
+let worstWhere = "";
+for (const m of PAY_METHOD_ORDER) {
+  const row = PACKS.map((p) => perSpark(p, m));
+  const low = Math.min(...row);
+  if (low < worst) {
+    worst = low;
+    worstWhere = `${m}, пакет ${PACKS[row.indexOf(low)].tier}`;
   }
+  const live = PAY_METHODS[m].live ? "" : "  (выключен)";
+  console.log(
+    `${m.padEnd(8)} ${row.map((v) => v.toFixed(5).padStart(9)).join(" ")}  ${low.toFixed(5)}${live}`
+  );
+}
+console.log(`\nХудший случай: $${worst.toFixed(6)} за искру (${worstWhere})\n`);
+
+check(
+  worst === Math.min(...PACKS.map((p) => perSpark(p, "stars"))),
+  "худший рельс — звёзды, под них и считается цена кадра"
+);
+
+// ── Модели ───────────────────────────────────────────────────────────────────
+
+console.log("Модель            цена ✨   выручка   с/с      доля");
+for (const id of MODEL_ORDER) {
+  const info = MODELS[id];
+  const revenue = info.price * worst;
+  const cost = info.costUsd * RETRY_OVERHEAD;
+  const share = cost / revenue;
+  console.log(
+    `${id.padEnd(8)} ${String(info.price).padStart(12)}   $${revenue.toFixed(4)}  ` +
+      `$${cost.toFixed(4)}  ${(share * 100).toFixed(1)}%`
+  );
+  check(share <= 0.5, `${id}: доля себестоимости ${(share * 100).toFixed(1)}% не выше 50%`);
 }
 console.log("");
 
-// Баланс после серии покупок и генераций — сходится на бумаге.
-let balance = 0;
-balance += PACKAGES.set.sparks;      // купил Сет
-balance -= SPARKS_PER_IMAGE * 3;     // три кадра
-balance += SPARKS_PER_IMAGE;         // один провалился, вернули
-balance += PACKAGES.probe.sparks;    // докупил Пробу
-check(balance === 180 - 36 + 12 + 60, `баланс сходится: ${balance} ✨ = ${framesFor(balance)} кадров`);
+// Порядок на экране — по убыванию: дорогая первой работает якорем.
+for (let i = 1; i < MODEL_ORDER.length; i++) {
+  const prev = MODELS[MODEL_ORDER[i - 1]].price;
+  const cur = MODELS[MODEL_ORDER[i]].price;
+  check(prev > cur, `${MODEL_ORDER[i - 1]} дороже ${MODEL_ORDER[i]} (${prev} > ${cur})`);
+}
+check(MODELS[CHEAPEST_MODEL].price === MIN_PRICE, `«кадр от ${MIN_PRICE} ✨» — это ${CHEAPEST_MODEL}`);
+check(
+  MODELS[PRIMARY_MODEL].price < MODELS[DEAREST_MODEL].price,
+  "синяя кнопка не на флагмане: первый кадр новичка не должен стоить дороже всех"
+);
+check(
+  new Set(MODEL_ORDER.map((id) => MODELS[id].kieId)).size === MODEL_ORDER.length,
+  "у каждой модели свой id в kie"
+);
+console.log("");
 
-console.log(failed === 0 ? "\nВсё сошлось." : `\nПровалено проверок: ${failed}`);
+// ── Пакеты ───────────────────────────────────────────────────────────────────
+
+console.log("Пакет   ₽      USDT   ⭐      база ✨  ₽/крипта ✨  звёзды ✨");
+for (const p of PACKS) {
+  console.log(
+    `${String(p.tier).padEnd(7)} ${String(p.rub).padStart(6)} ${String(p.usdt).padStart(6)} ` +
+      `${String(p.stars).padStart(6)} ${String(p.base).padStart(8)} ` +
+      `${String(sparksOf(p, "sbp")).padStart(12)} ${String(sparksOf(p, "stars")).padStart(10)}`
+  );
+}
+console.log("");
+
+for (const p of PACKS) {
+  check(p.base === p.stars, `пакет ${p.tier}: базовый размен 1 ✨ = 1 ⭐`);
+  check(
+    p.rub === Math.round(p.base * SPARK_PRICE_RUB),
+    `пакет ${p.tier}: ${p.rub} ₽ = ${p.base} ✨ по курсу ${SPARK_PRICE_RUB} ₽`
+  );
+  check(p.bonusStars <= p.bonusFiat, `пакет ${p.tier}: бонус на звёздах не выше рублёвого`);
+}
+for (let i = 1; i < PACKS.length; i++) {
+  check(PACKS[i].rub > PACKS[i - 1].rub, `пакет ${PACKS[i].tier} дороже предыдущего`);
+  check(
+    PACKS[i].bonusFiat >= PACKS[i - 1].bonusFiat,
+    `пакет ${PACKS[i].tier}: бонус не убывает с размером`
+  );
+}
+console.log("");
+
+// ── Курс ─────────────────────────────────────────────────────────────────────
+/** Рубли обязаны платить лучше звёзд — иначе худшим рельсом становятся они. */
+const rubPerSpark = (SPARK_PRICE_RUB / USD_RUB) * (1 - ACQUIRING_FEE);
+console.log(
+  `Курс: 1 ✨ = ${SPARK_PRICE_RUB} ₽ = 1 ⭐ (${STAR_PRICE_RUB} ₽ для юзера)\n` +
+    `Нетто за искру без бонуса: рубли $${rubPerSpark.toFixed(5)}, ` +
+    `звёзды $${STAR_PAYOUT_USD.toFixed(5)}\n`
+);
+check(rubPerSpark > STAR_PAYOUT_USD, "рублёвый рельс платит лучше звёздного");
+
+// Запас по ставке эквайринга: при какой она сравняется со звёздами.
+const breakEven = 1 - (STAR_PAYOUT_USD * USD_RUB) / SPARK_PRICE_RUB;
+console.log(
+  `Эквайринг ломает курс при ставке выше ${(breakEven * 100).toFixed(0)}% ` +
+    `(заложено ${(ACQUIRING_FEE * 100).toFixed(0)}%)\n`
+);
+check(breakEven > 0.2, "курс держится при любой реалистичной ставке эквайринга");
+
+console.log(failed === 0 ? "Экономика сходится." : `Провалено проверок: ${failed}`);
 process.exit(failed === 0 ? 0 : 1);

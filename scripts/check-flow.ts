@@ -113,10 +113,12 @@ stub("owner", { notifyOwner: async () => {}, isOwner: () => false });
 
 let kieDown = false;
 let taskCounter = 0;
+const kieCalls: { model: string; prompt: string; images: number }[] = [];
 stub("kie", {
   uploadImage: async () => "https://kie.test/ref.jpg",
-  createTask: async () => {
+  createTask: async (model: string, prompt: string, images: string[]) => {
     if (kieDown) throw new Error("kie 500");
+    kieCalls.push({ model, prompt, images: images.length });
     return `task-${++taskCounter}`;
   },
 });
@@ -124,6 +126,7 @@ stub("kie", {
 const S = require("../src/store") as typeof import("../src/store");
 const F = require("../src/flow") as typeof import("../src/flow");
 const D = require("../src/deliver") as typeof import("../src/deliver");
+const { MODELS } = require("../src/config") as typeof import("../src/config");
 const { t } = require("../src/i18n") as typeof import("../src/i18n");
 
 // ── Проверки ─────────────────────────────────────────────────────────────────
@@ -148,71 +151,129 @@ function screens(): Msg[] {
 }
 
 const CHAT = 777;
+const PRICE = MODELS.nbpro.price; // 20
 
 async function main(): Promise<void> {
   await S.ensureUser(CHAT);
   await S.setName(CHAT, "Слава");
 
-  await F.moveHome(CHAT);
+  await F.move(CHAT, { id: "home" });
   show("/start");
   check(chat.length === 1, "после /start в ленте одно сообщение");
+
+  await F.draw(CHAT, { id: "models" });
+  await S.setModel(CHAT, "nbpro");
+  await F.draw(CHAT, { id: "model", model: "nbpro" });
+  show("Выбрали Nano Banana Pro");
+  check(chat.length === 1, "выбор модели прошёл в том же сообщении");
+  check(
+    chat[0].text.includes("Nano Banana Pro") && chat[0].text.includes("20 ✨"),
+    "модель и цена кадра видны на экране"
+  );
+  check(
+    chat[0].buttons.some((b) => b.includes("Пополнить")),
+    "искр не хватает — пополнение показано"
+  );
+
+  await S.setSource(CHAT, "photo");
+  await F.draw(CHAT, { id: "upload" });
+  show("Использовать моё фото");
+  check(chat.length === 1, "экран загрузки — то же сообщение");
 
   // Альбом из четырёх селфи: каждое перерисовывает экран, а не плодит новые.
   for (let i = 0; i < 4; i++) {
     await S.reservePhotoSlot(CHAT);
     await S.addPhotoUrl(CHAT, `https://kie.test/${i}.jpg`);
-    await F.moveHome(CHAT);
+    await F.move(CHAT, { id: "prompt" });
   }
   show("Четыре селфи");
   check(chat.length === 1, "четыре селфи не оставили четырёх экранов");
   check(screens().length === 1, "рабочий экран ровно один");
 
-  await F.drawPaywall(CHAT);
-  show("Пейволл");
-  check(chat.length === 1, "пейволл открылся в том же сообщении");
-  check(chat[0].buttons.length === 4, "три пакета и «Назад»");
+  // Промпт при пустом балансе: искры не спишутся, человек уедет в пополнение.
+  await F.startGeneration(CHAT, "на крыше в вечернем городе");
+  show("Промпт без искр");
+  check(chat.length === 1, "нехватка искр не добавила сообщений");
+  check((await S.isGenerating(CHAT)) === false, "замок не остался висеть");
+  check(
+    chat[0].buttons.some((b) => b.includes("Звёзды")),
+    "показан экран пополнения со способами оплаты"
+  );
 
-  await S.credit(CHAT, 180);
-  await F.moveHome(CHAT, { notice: t("home.notice.paid", { added: "180 ✨" }) });
+  await F.draw(CHAT, { id: "packs", method: "stars", from: "nbpro" });
+  show("Пакеты за звёзды");
+  check(chat.length === 1, "пакеты открылись в том же сообщении");
+  check(chat[0].buttons.length === 5, "четыре пакета и «Назад»");
+  check(
+    chat[0].buttons[chat[0].buttons.length - 1].includes("Назад"),
+    "«Назад» — последней кнопкой"
+  );
+
+  // Оплата: чек уже в ленте, экран переезжает под него — и туда, откуда ушли платить.
+  await S.credit(CHAT, 550);
+  await F.move(CHAT, await F.originRef(CHAT), { notice: t("notice.paid", { added: "550 ✨" }) });
   show("Оплата прошла");
   check(chat.length === 1, "после оплаты по-прежнему одно сообщение");
+  check(
+    chat[0].text.includes("Nano Banana Pro"),
+    "после оплаты человек вернулся на экран своей модели, а не на корень"
+  );
+  check(
+    !chat[0].buttons.some((b) => b.includes("Пополнить")),
+    "искр хватает — пополнение с экрана модели ушло"
+  );
 
-  await F.startGeneration(CHAT);
-  show("Нажали «Сделать кадр»");
+  await F.startGeneration(CHAT, "на крыше в вечернем городе");
+  show("Прислали промпт");
   check(chat.length === 1, "экран «идёт работа» перерисован, а не отправлен");
   check(chat[0].buttons.length === 0, "во время генерации нажимать нечего");
-  check((await S.getBalance(CHAT)) === 168, "списано ровно 12 ✨");
+  check((await S.getBalance(CHAT)) === 550 - PRICE, `списано ровно ${PRICE} ✨`);
+  check(kieCalls[0].model === "nbpro", "в kie ушла выбранная модель");
+  check(kieCalls[0].images === 4, "в kie ушли все четыре селфи");
+  check(
+    kieCalls[0].prompt.includes("на крыше в вечернем городе"),
+    "промпт человека дошёл до модели"
+  );
 
-  await F.startGeneration(CHAT);
-  check((await S.getBalance(CHAT)) === 168, "двойной тап не списал второй раз");
-  check(chat.length === 1, "двойной тап не добавил сообщений");
+  await F.startGeneration(CHAT, "ещё один кадр");
+  check((await S.getBalance(CHAT)) === 550 - PRICE, "второй промпт подряд не списал второй раз");
+  check(chat.length === 1, "и не добавил сообщений");
 
   await D.deliverTask("task-1", (await S.getTask("task-1"))!, "https://kie.test/out.jpg");
   show("Кадр выдан");
   check(chat.length === 2, "кадр — отдельный объект, экран переехал под него");
   check(chat[0].kind === "photo", "кадр выше экрана");
+  check(chat[0].text.includes("<code>"), "промпт лежит под кадром — можно повторить");
   check(screens().length === 1, "у кадра своей клавиатуры нет");
-  check(chat[1].buttons.length === 3, "под кадром снова рабочий экран");
+  check(chat[1].text.includes("Nano Banana Pro"), "под кадром экран той же модели: повтор в 1 тап");
 
-  await F.startGeneration(CHAT);
+  await F.startGeneration(CHAT, "второй кадр");
   await D.refundTask("task-2", (await S.getTask("task-2"))!, "тест");
   show("Кадр провалился");
-  check((await S.getBalance(CHAT)) === 168, "искры вернулись");
+  check((await S.getBalance(CHAT)) === 550 - PRICE, "искры вернулись");
   check(chat.length === 2, "возврат не добавил сообщений в ленту");
   check(chat[1].text.startsWith("⊗"), "возврат виден первой строкой экрана");
   check((await S.isGenerating(CHAT)) === false, "замок отпущен");
 
   kieDown = true;
-  await F.startGeneration(CHAT);
+  await F.startGeneration(CHAT, "третий кадр");
   show("kie недоступен");
-  check((await S.getBalance(CHAT)) === 168, "искры не пропали");
+  check((await S.getBalance(CHAT)) === 550 - PRICE, "искры не пропали");
   check(chat.length === 2, "и здесь лента не выросла");
   check((await S.isGenerating(CHAT)) === false, "замок отпущен и после отказа kie");
 
-  // Экран удалили руками: правка падает, бот молча присылает новый экран.
+  // Режим «словами»: фото остались в состоянии, но в kie не уходят.
   kieDown = false;
+  await S.setSource(CHAT, "text");
+  await F.startGeneration(CHAT, "рыжий кот в скафандре на луне");
+  const last = kieCalls[kieCalls.length - 1];
+  check(last.images === 0, "в режиме «словами» селфи в kie не уходят");
+  check(last.prompt === "рыжий кот в скафандре на луне", "промпт уходит без преамбулы про лицо");
+  await D.refundTask(`task-${taskCounter}`, (await S.getTask(`task-${taskCounter}`))!, "сброс");
+
+  // Экран удалили руками: правка падает, бот молча присылает новый экран.
   chat.length = 0;
-  await F.drawHome(CHAT);
+  await F.draw(CHAT, { id: "model", model: "nbpro" });
   show("Экран удалили руками");
   check(chat.length === 1, "экран восстановился новым сообщением");
   check(screens().length === 1, "и он рабочий");

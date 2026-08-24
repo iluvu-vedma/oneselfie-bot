@@ -1,20 +1,37 @@
 import { redis, k, num, bump } from "./kv";
-import { GEN_LOCK_TTL_SEC, HUB_TTL_SEC, MAX_PHOTOS, TASK_TTL_SEC } from "./config";
-import { SCENES } from "./scenes";
+import {
+  GEN_LOCK_TTL_SEC,
+  HUB_TTL_SEC,
+  MAX_PHOTOS,
+  ModelId,
+  TASK_TTL_SEC,
+  isModelId,
+} from "./config";
 
 export type UserStatus = "started" | "photos_ready" | "paid";
+
+/** Откуда берётся кадр: из своих фото или из одного текста. */
+export type Source = "photo" | "text";
 
 export interface UserProfile {
   status: UserStatus;
   /** Имя из Telegram. Нужно приветствию, которое рисуется и без входящего апдейта. */
   name: string;
+  /** Выбранная модель. null — человек ещё не доходил до выбора. */
+  model: ModelId | null;
+  source: Source | null;
+  /** Куда вернуть по «Назад» с экрана пополнения. */
+  topupFrom: string;
   fails: number;
   createdAt: number;
 }
 
 export interface TaskRecord {
   chatId: number;
-  sceneIndex: number;
+  /** Какой моделью считали. Нужно экрану, который рисуется после выдачи. */
+  model: ModelId | null;
+  /** Что написал человек. Уходит в подпись под кадром — чтобы повторить. */
+  prompt: string;
   /** Сколько искр снято — столько и вернём. Не берётся из константы при возврате. */
   cost: number;
   /** Токен замка генерации, выданный при списании. */
@@ -30,7 +47,7 @@ export interface TaskRecord {
 export async function ensureUser(chatId: number): Promise<boolean> {
   const created = await redis.hsetnx(k.user(chatId), "createdAt", Date.now());
   if (created) {
-    await redis.hset(k.user(chatId), { status: "started", fails: 0, sceneIndex: 0 });
+    await redis.hset(k.user(chatId), { status: "started", fails: 0 });
     await bump("start_new");
   }
   return created === 1;
@@ -38,9 +55,14 @@ export async function ensureUser(chatId: number): Promise<boolean> {
 
 export async function getUser(chatId: number): Promise<UserProfile> {
   const raw = (await redis.hgetall<Record<string, unknown>>(k.user(chatId))) ?? {};
+  const source = raw.source === "photo" || raw.source === "text" ? raw.source : null;
   return {
     status: (raw.status as UserStatus) ?? "started",
     name: raw.name ? String(raw.name) : "",
+    // Значение из KV не бывает доверенным: реестр моделей мог поменяться между деплоями.
+    model: isModelId(raw.model) ? raw.model : null,
+    source,
+    topupFrom: raw.topupFrom ? String(raw.topupFrom) : "",
     fails: num(raw.fails),
     createdAt: num(raw.createdAt),
   };
@@ -55,10 +77,25 @@ export async function setStatus(chatId: number, status: UserStatus): Promise<voi
   await redis.hset(k.user(chatId), { status });
 }
 
-/** Курсор по пулу сценариев. HINCRBY атомарен — два кадра подряд не получат один сценарий. */
-export async function nextSceneIndex(chatId: number): Promise<number> {
-  const n = await redis.hincrby(k.user(chatId), "sceneIndex", 1);
-  return (num(n) - 1) % SCENES.length;
+export async function setModel(chatId: number, model: ModelId): Promise<void> {
+  await redis.hset(k.user(chatId), { model });
+}
+
+export async function getModel(chatId: number): Promise<ModelId | null> {
+  const raw = await redis.hget(k.user(chatId), "model");
+  return isModelId(raw) ? raw : null;
+}
+
+export async function setSource(chatId: number, source: Source): Promise<void> {
+  await redis.hset(k.user(chatId), { source });
+}
+
+/**
+ * Куда вернуть по «Назад» с пополнения. Хранится callback_data целевого экрана:
+ * человек, пришедший с экрана модели, не должен вылетать на корень и терять выбор.
+ */
+export async function setTopupFrom(chatId: number, ref: string): Promise<void> {
+  await redis.hset(k.user(chatId), { topupFrom: ref });
 }
 
 export async function bumpFails(chatId: number): Promise<number> {
@@ -120,7 +157,7 @@ export async function releaseGenLock(chatId: number, token?: string): Promise<vo
   await redis.eval(UNLOCK_LUA, [k.genLock(chatId)], [token]);
 }
 
-/** Идёт ли прямо сейчас генерация. Экран «идёт работа» выводится из этого, а не из флага в профиле. */
+/** Идёт ли прямо сейчас генерация. Экран busy выводится из этого, а не из флага в профиле. */
 export async function isGenerating(chatId: number): Promise<boolean> {
   return (await redis.exists(k.genLock(chatId))) === 1;
 }
@@ -180,7 +217,7 @@ export async function addPhotoUrl(chatId: number, url: string): Promise<number> 
   return num(await redis.rpush(k.photos(chatId), url));
 }
 
-/** /new: селфи сбрасываются, баланс искр остаётся — он привязан к человеку, а не к фото. */
+/** Селфи сбрасываются, баланс искр остаётся — он привязан к человеку, а не к фото. */
 export async function clearPhotos(chatId: number): Promise<void> {
   await redis.del(k.photos(chatId), k.photoSlots(chatId));
   await setStatus(chatId, "started");
@@ -191,14 +228,15 @@ export async function clearPhotos(chatId: number): Promise<void> {
 export async function createTaskRecord(
   taskId: string,
   chatId: number,
-  sceneIndex: number,
+  model: ModelId,
+  prompt: string,
   cost: number,
   lock: string
 ): Promise<void> {
   const now = Date.now();
   // sent и refunded НЕ пишутся заранее: claimSend/claimRefund держатся на HSETNX,
   // а он не сработает, если поле уже существует. Отсутствие поля и значит «ещё нет».
-  await redis.hset(k.task(taskId), { chatId, sceneIndex, cost, lock, createdAt: now });
+  await redis.hset(k.task(taskId), { chatId, model, prompt, cost, lock, createdAt: now });
   await redis.expire(k.task(taskId), TASK_TTL_SEC);
   await redis.zadd(k.pending, { score: now, member: taskId });
 }
@@ -208,7 +246,8 @@ export async function getTask(taskId: string): Promise<TaskRecord | null> {
   if (!raw || raw.chatId === undefined) return null;
   return {
     chatId: num(raw.chatId),
-    sceneIndex: num(raw.sceneIndex),
+    model: isModelId(raw.model) ? raw.model : null,
+    prompt: raw.prompt === undefined || raw.prompt === null ? "" : String(raw.prompt),
     cost: num(raw.cost),
     lock: raw.lock ? String(raw.lock) : "",
     sent: num(raw.sent) === 1,
@@ -260,7 +299,7 @@ export async function markPhotosReady(chatId: number): Promise<boolean> {
   return (await redis.hsetnx(k.user(chatId), "photosCounted", 1)) === 1;
 }
 
-/** То же для пейволла: в воронке считаем людей, а не показы. */
-export async function markPaywallShown(chatId: number): Promise<boolean> {
-  return (await redis.hsetnx(k.user(chatId), "paywallCounted", 1)) === 1;
+/** То же для пополнения: в воронке считаем людей, а не показы. */
+export async function markTopupShown(chatId: number): Promise<boolean> {
+  return (await redis.hsetnx(k.user(chatId), "topupCounted", 1)) === 1;
 }

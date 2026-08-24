@@ -33,7 +33,7 @@ require.cache[kvPath] = {
 } as any;
 
 const S = require("../src/store") as typeof import("../src/store");
-const { SCENES } = require("../src/scenes") as typeof import("../src/scenes");
+const { MODELS } = require("../src/config") as typeof import("../src/config");
 
 let failed = 0;
 function check(ok: boolean, label: string) {
@@ -51,23 +51,38 @@ async function main() {
   await S.ensureUser(chat);
   check((await S.getBalance(chat)) === 24, "повторный /start не сбросил баланс");
 
-  // Двойной тап по «Сделать кадр»: замок пускает одного.
+  // Модель, источник и адрес возврата с пополнения живут в профиле.
+  check((await S.getModel(chat)) === null, "модель не выбрана — воронки ещё нет");
+  await S.setModel(chat, "nbpro");
+  await S.setSource(chat, "photo");
+  await S.setTopupFrom(chat, "nbpro");
+  const user = await S.getUser(chat);
+  check(user.model === "nbpro" && user.source === "photo", "модель и источник запомнились");
+  check(user.topupFrom === "nbpro", "«Назад» с пополнения вернёт на экран модели");
+
+  // Мусор в KV не должен пролезть в экран: реестр моделей меняется между деплоями.
+  await fake.hset(k.user(chat), { model: "nano-banana-9000" });
+  check((await S.getModel(chat)) === null, "неизвестная модель из KV читается как «не выбрана»");
+  await S.setModel(chat, "nb2");
+
+  // Двойной тап: замок пускает одного.
   const locks = await Promise.all([S.acquireGenLock(chat), S.acquireGenLock(chat)]);
   const token = locks.find(Boolean)!;
   check(locks.filter(Boolean).length === 1, `замок генерации взят один раз (${locks})`);
 
   // Опоздавший возврат по старой задаче не должен снимать чужой замок.
   await S.releaseGenLock(chat, "l-чужой-токен");
-  check(await S.acquireGenLock(chat) === null, "чужой токен замок не снял");
+  check((await S.acquireGenLock(chat)) === null, "чужой токен замок не снял");
   await S.releaseGenLock(chat, token);
   const reacquired = await S.acquireGenLock(chat);
   check(reacquired !== null, "свой токен замок снял");
   await S.releaseGenLock(chat, reacquired!);
 
-  // Списание: два подряд при балансе 24 проходят, третье — нет, и баланс не уходит в минус.
-  check((await S.trySpend(chat, 12)) === 12, "первое списание: остаток 12");
-  check((await S.trySpend(chat, 12)) === 0, "второе списание: остаток 0");
-  check((await S.trySpend(chat, 12)) === null, "третье списание отклонено");
+  // Списание: цена берётся из модели, третье списание не проходит.
+  const price = MODELS.nb2.price; // 12
+  check((await S.trySpend(chat, price)) === 12, `первое списание ${price}: остаток 12`);
+  check((await S.trySpend(chat, price)) === 0, "второе списание: остаток 0");
+  check((await S.trySpend(chat, price)) === null, "третье списание отклонено");
   check((await S.getBalance(chat)) === 0, "баланс не ушёл в минус");
 
   // Селфи: пятое не пролезает.
@@ -78,24 +93,24 @@ async function main() {
     `принято 4 слота, пятый отклонён (${slots.join(",")})`
   );
 
-  // Курсор сценариев идёт по кругу и не повторяется на соседях.
-  const seen: number[] = [];
-  for (let i = 0; i < SCENES.length + 1; i++) seen.push(await S.nextSceneIndex(chat));
-  check(seen[0] === 0 && seen[SCENES.length] === 0, "курсор сценариев замкнулся по кругу");
-  check(new Set(seen.slice(0, SCENES.length)).size === SCENES.length, "за круг ни одного повтора");
-
-  // Задача: выдача и возврат — строго по одному разу.
-  await S.createTaskRecord("t1", chat, 3, 12, "lock-1");
+  // Задача: модель и промпт лежат в ней, а не берутся из состояния при выдаче —
+  // человек мог за это время выбрать другую модель.
+  await S.createTaskRecord("t1", chat, "nbpro", "кот в скафандре", 20, "lock-1");
   const sends = await Promise.all([S.claimSend("t1"), S.claimSend("t1")]);
   check(sends.filter(Boolean).length === 1, `двойной коллбэк отдаёт кадр один раз (${sends})`);
+  const t1 = await S.getTask("t1");
+  check(
+    t1?.model === "nbpro" && t1.prompt === "кот в скафандре" && t1.cost === 20,
+    "модель, промпт и цена лежат в задаче"
+  );
 
-  await S.createTaskRecord("t2", chat, 4, 12, "lock-2");
+  await S.createTaskRecord("t2", chat, "gpt2", "закат", 10, "lock-2");
   const refunds = await Promise.all([S.claimRefund("t2"), S.claimRefund("t2")]);
   check(refunds.filter(Boolean).length === 1, `возврат искр происходит один раз (${refunds})`);
 
   const t2 = await S.getTask("t2");
   check(
-    t2?.cost === 12 && t2.refunded === true && t2.lock === "lock-2",
+    t2?.cost === 10 && t2.refunded === true && t2.lock === "lock-2",
     "стоимость и токен замка лежат в задаче, а не берутся из константы"
   );
 
@@ -107,7 +122,10 @@ async function main() {
   const stale = await S.pendingOlderThan(Date.now() + 1000);
   check(stale.length === 2 && stale.includes("t1"), `в очереди добора: ${stale.join(",")}`);
   await S.forgetPending("t1");
-  check((await S.pendingOlderThan(Date.now() + 1000)).length === 1, "выданная задача ушла из очереди");
+  check(
+    (await S.pendingOlderThan(Date.now() + 1000)).length === 1,
+    "выданная задача ушла из очереди"
+  );
 
   // Экран: id читается один раз и сразу забывается — иначе после переезда вниз
   // бот будет править сообщение, которого пользователь уже не видит.
@@ -123,12 +141,14 @@ async function main() {
   check((await S.isGenerating(chat)) === true, "с замком генерация идёт");
   await S.releaseGenLock(chat, genToken);
 
-  // /new: селфи сбрасываются, баланс остаётся.
+  // «Заменить фото»: селфи сбрасываются, баланс и выбранная модель остаются.
   await S.credit(chat, 60);
   await S.clearPhotos(chat);
   check(
-    (await S.getPhotos(chat)).length === 0 && (await S.getBalance(chat)) === 60,
-    "/new сбросил селфи и сохранил баланс"
+    (await S.getPhotos(chat)).length === 0 &&
+      (await S.getBalance(chat)) === 60 &&
+      (await S.getModel(chat)) === "nb2",
+    "сброс фото сохранил баланс и выбранную модель"
   );
 
   console.log(failed === 0 ? "\nВсё сошлось." : `\nПровалено проверок: ${failed}`);

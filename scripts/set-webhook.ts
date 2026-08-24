@@ -28,6 +28,7 @@ async function main() {
         { command: "start", description: t("command.start") },
         { command: "balance", description: t("command.balance") },
         { command: "new", description: t("command.new") },
+        { command: "help", description: t("command.help") },
       ],
     })
   );
