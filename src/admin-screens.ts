@@ -10,12 +10,12 @@ import {
   signOf,
 } from "./config";
 import { day, esc, num, pct, plural, t, when } from "./i18n";
-import type { Fail, Op } from "./ledger";
+import type { ErrorNote, Fail, Op } from "./ledger";
 import type { Notice, Screen } from "./screens";
 import { compose } from "./screens";
-import type { Dash } from "./stats";
+import type { Dash, Health } from "./stats";
 import type { Person } from "./store";
-import { ACB, CB, modelName, parsePayload, personName, sparks } from "./ui";
+import { ACB, CB, dur, modelName, parsePayload, personName, sparks, tasks } from "./ui";
 
 /**
  * Экраны админки. Как и продуктовые экраны — чистые функции от состояния
@@ -160,8 +160,104 @@ function dashboardKeyboard(fails: number, users: number): InlineKeyboard {
   kb.row().text(t("admin.button.find"), ACB.find);
   if (fails === 0) kb.primary();
   kb.text(t("admin.button.users", { count: num(users) }), ACB.users);
+  // Здоровье отдельной строкой и без цвета: заходят сюда не за ним, а за
+  // людьми и деньгами. Оно нужно ровно тогда, когда что-то идёт не так.
+  kb.row().text(t("admin.button.health"), ACB.health);
   refresh(kb, ACB.home);
   return back(kb, CB.home);
+}
+
+// ── Здоровье ─────────────────────────────────────────────────────────────────
+
+export interface HealthState extends Notice {
+  health: Health;
+  errors: ErrorNote[];
+  /** Сколько сбоев генераций лежит в логе. Число едет на кнопку, как на дашборде. */
+  fails: number;
+}
+
+/**
+ * Отдельный экран от дашборда потому, что читают их в разных состояниях.
+ * Дашборд смотрят с утра за кофе — он про то, как идут дела. Здоровье
+ * открывают, когда пришла жалоба, и оно отвечает на один вопрос: бот сейчас
+ * работает или тонет.
+ *
+ * Очередь стоит первой строкой: растущая очередь недобранных кадров — это
+ * списанные искры без картинки, то есть самая дорогая из поломок.
+ */
+export function health(s: HealthState): Screen {
+  const { queue, speed, errors, today } = s.health;
+
+  const log = s.errors.map((e) =>
+    t("admin.health.log.line", {
+      when: when(e.at),
+      where: esc(e.where),
+      rid: esc(e.rid),
+      detail: esc(e.detail),
+    })
+  );
+
+  return {
+    text: compose(
+      s.notice,
+      [
+        t("admin.health.title"),
+        queue.size === 0
+          ? t("admin.health.queue.calm")
+          : t("admin.health.queue.busy", {
+              tasks: tasks(queue.size),
+              age: dur(queue.oldestMs),
+            }),
+      ],
+      [
+        t("admin.health.speed.title"),
+        speed.frameMs === 0
+          ? t("admin.health.speed.empty")
+          : t("admin.health.speed.line", {
+              frame: dur(speed.frameMs),
+              kie: dur(speed.kieMs),
+            }),
+      ],
+      [
+        t("admin.health.today.title"),
+        t("admin.health.today.line", {
+          gen: num(today.gen),
+          done: num(today.done),
+          failed: num(today.failed),
+        }),
+      ],
+      [
+        t("admin.health.errors.title"),
+        t("admin.health.errors.kie", {
+          today: plural("unit.time", errors.kieToday),
+          total: num(errors.kie),
+        }),
+        t("admin.health.errors.bot", { slow: num(errors.slow), busy: num(errors.busy) }),
+      ],
+      [
+        t("admin.health.log.title"),
+        log.length === 0 ? t("admin.health.log.empty") : log.join("\n"),
+      ],
+      log.length > 0 && t("admin.health.log.hint"),
+      t("common.bridge")
+    ),
+    reply_markup: healthKeyboard(s.fails),
+  };
+}
+
+/**
+ * Синяя — там, где проблема, ровно как на дашборде. Сбои есть — она ведёт
+ * в их лог: сломавшийся бот означает людей с пустыми руками, и первое дело
+ * не чинить код, а вернуть им искры. Сбоев нет — главным действием становится
+ * обновление: на этот экран и приходят затем, чтобы смотреть, как меняются числа.
+ */
+function healthKeyboard(fails: number): InlineKeyboard {
+  const kb = new InlineKeyboard()
+    .text(t("admin.button.fails", { count: num(fails) }), ACB.fails);
+  if (fails > 0) kb.primary();
+  kb.row().text(t("admin.button.refresh"), ACB.health);
+  if (fails === 0) kb.primary();
+  return back(kb, ACB.home);
 }
 
 // ── Сбои ─────────────────────────────────────────────────────────────────────
@@ -306,6 +402,12 @@ export interface CardState extends Notice {
    */
   owedReturned: boolean;
   /**
+   * Сколько селфи человека ещё лежит в хранилище. Ноль — кнопки просмотра нет
+   * вовсе: ссылки живут около суток, и кнопка, ведущая в пустоту, хуже её
+   * отсутствия.
+   */
+  photos: number;
+  /**
    * Куда вернёт «Назад». Человека открывают из трёх мест, и выкидывать его
    * из списка сбоев на корень означает искать это место заново после каждого
    * начисления.
@@ -388,7 +490,7 @@ export function card(s: CardState): Screen {
       s.opsTotal >= LEDGER_KEEP && t("admin.card.ops.trimmed", { keep: num(LEDGER_KEEP) }),
       t("common.bridge")
     ),
-    reply_markup: cardKeyboard(p.chatId, s.owed, s.owedReturned, s.backTo),
+    reply_markup: cardKeyboard(p.chatId, s.owed, s.owedReturned, s.photos, s.backTo),
   };
 }
 
@@ -402,6 +504,7 @@ function cardKeyboard(
   chatId: number,
   owed: number,
   owedReturned: boolean,
+  photos: number,
   backTo: string
 ): InlineKeyboard {
   const kb = new InlineKeyboard();
@@ -418,6 +521,11 @@ function cardKeyboard(
   kb.text(t("admin.button.grant"), ACB.reason(chatId));
   if (owed === 0) kb.success();
   kb.text(t("admin.button.take"), ACB.amount(chatId, TAKE_REASON)).danger();
+  // Селфи — отдельным рядом и без цвета: это не действие с деньгами, а взгляд
+  // на исходник. Жалоба «кадр не похож» разбирается только отсюда.
+  if (photos > 0) {
+    kb.row().text(t("admin.button.photos", { count: num(photos) }), ACB.photos(chatId));
+  }
   refresh(kb, ACB.card(chatId));
   return back(kb, backTo);
 }

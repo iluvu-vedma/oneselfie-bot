@@ -6,6 +6,7 @@ import {
   GRANT_MAX,
   GRANT_REASONS,
   GrantReason,
+  HEALTH_ERRORS,
   LEDGER_KEEP,
   LIST_BUTTONS,
   LIST_ROWS,
@@ -15,15 +16,16 @@ import {
 import * as admin from "./admin-screens";
 import { currentRef, move as moveUser } from "./flow";
 import * as hub from "./hub";
-import { t } from "./i18n";
+import { esc, t } from "./i18n";
 import { bump } from "./kv";
 import * as ledger from "./ledger";
+import * as log from "./log";
 import { isAdmin } from "./owner";
 import type { Screen } from "./screens";
-import { buildDash } from "./stats";
+import { buildDash, buildHealth } from "./stats";
 import * as store from "./store";
 import { bot as telegram } from "./telegram";
-import { ACB, sparks } from "./ui";
+import { ACB, personName, selfies, sparks } from "./ui";
 
 /**
  * Админка: дашборд, лог сбоев, карточка человека и ручное движение искр.
@@ -42,6 +44,7 @@ import { ACB, sparks } from "./ui";
 
 type Ref =
   | { id: "home" }
+  | { id: "health" }
   | { id: "fails" }
   | { id: "users" }
   | { id: "find" }
@@ -68,6 +71,15 @@ async function render(adminId: number, ref: Ref, extra: Extra = {}): Promise<Scr
         ledger.failsCount(),
       ]);
       return admin.dashboard({ dash, users, fails, notice });
+    }
+
+    case "health": {
+      const [health, errors, fails] = await Promise.all([
+        buildHealth(),
+        ledger.recentErrors(HEALTH_ERRORS),
+        ledger.failsCount(),
+      ]);
+      return admin.health({ health, errors, fails, notice });
     }
 
     case "fails": {
@@ -101,11 +113,12 @@ async function render(adminId: number, ref: Ref, extra: Extra = {}): Promise<Scr
       return admin.find({ notice });
 
     case "card": {
-      const [person, ops, opsTotal, fails, state] = await Promise.all([
+      const [person, ops, opsTotal, fails, photos, state] = await Promise.all([
         store.getPerson(ref.target),
         ledger.history(ref.target, LEDGER_KEEP),
         ledger.historySize(ref.target),
         ledger.failsOf(ref.target, CARD_FAILS),
+        store.photoCount(ref.target),
         store.getAdminState(adminId),
       ]);
       return admin.card({
@@ -113,6 +126,7 @@ async function render(adminId: number, ref: Ref, extra: Extra = {}): Promise<Scr
         ops: ops.slice(0, CARD_OPS),
         opsTotal,
         fails,
+        photos,
         owed: owedFor(ops, fails),
         owedReturned: fails[0]?.back ?? true,
         backTo: backCb(state.back),
@@ -307,7 +321,7 @@ async function tellUser(
     // ещё и отсюда — значит удалить карточку прямо из-под собственной кнопки.
     if (target !== adminId) await moveUser(target, await currentRef(target));
   } catch (e) {
-    console.error("grant notice failed", target, e);
+    log.error("admin.grantNotice", e, { target });
   }
 }
 
@@ -418,6 +432,56 @@ export function install(bot: Bot<Context>): void {
     await store.setAdminBack(ctx.chat!.id, "home");
     await store.setAdminWait(ctx.chat!.id, "");
     await show(ctx, { id: "home" });
+  });
+
+  panel.callbackQuery(ACB.health, async (ctx) => {
+    await ctx.answerCallbackQuery();
+    await store.setAdminBack(ctx.chat!.id, "home");
+    await show(ctx, { id: "health" });
+  });
+
+  /**
+   * Селфи человека альбомом. Отдельными объектами в ленте — иначе никак:
+   * экран текстовый, а превратить текстовое сообщение в медийное Telegram
+   * не даёт. Карточка после этого переезжает под альбом.
+   *
+   * Просмотр чужих фотографий пишется в лог поимённо: доступ к ним есть у
+   * нескольких человек из ADMIN_IDS, и вопрос «кто смотрел» обязан иметь ответ.
+   */
+  panel.callbackQuery(ACB.PHOTOS_RE, async (ctx) => {
+    const adminId = ctx.chat!.id;
+    const target = Number(ctx.match![1]);
+    const [person, urls] = await Promise.all([
+      store.getPerson(target),
+      store.getPhotos(target),
+    ]);
+
+    if (urls.length === 0) {
+      await ctx.answerCallbackQuery({ text: t("admin.toast.noPhotos"), show_alert: true });
+      return show(ctx, { id: "card", target });
+    }
+
+    await ctx.answerCallbackQuery();
+    const shown = await hub.album(
+      adminId,
+      urls,
+      t("admin.photos.caption", {
+        name: esc(personName(person.username, person.chatId)),
+        selfies: selfies(urls.length),
+      })
+    );
+
+    log.info("admin.photos", { admin: adminId, target, count: urls.length, shown });
+    await bump("admin_photos_shown");
+    await moveTo(
+      adminId,
+      { id: "card", target },
+      {
+        notice: shown
+          ? t("admin.notice.photosShown", { selfies: selfies(urls.length) })
+          : t("admin.notice.photosGone"),
+      }
+    );
   });
 
   panel.callbackQuery(ACB.fails, async (ctx) => {

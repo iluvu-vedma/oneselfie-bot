@@ -35,6 +35,7 @@ stub("kv", {
   bump: async (event: string, by = 1) => {
     counters[event] = (counters[event] ?? 0) + by;
   },
+  measure: async () => {},
 });
 
 // ── Лента чата ───────────────────────────────────────────────────────────────
@@ -94,6 +95,16 @@ bot.api.config.use(async (_prev, method: string, payload: any) => {
       if (i >= 0) chat.splice(i, 1);
       return ok(true);
     }
+    case "sendMediaGroup": {
+      const msg: Msg = {
+        id: nextId++,
+        chat: Number(payload.chat_id),
+        text: String(payload.media?.[0]?.caption ?? ""),
+        buttons: [],
+      };
+      chat.push(msg);
+      return ok([{ message_id: msg.id }]);
+    }
     case "answerCallbackQuery":
       if (payload.text) toasts.push(String(payload.text));
       return ok(true);
@@ -111,6 +122,7 @@ stub("kie", {
 const S = require("../src/store") as typeof import("../src/store");
 const L = require("../src/ledger") as typeof import("../src/ledger");
 const A = require("../src/admin") as typeof import("../src/admin");
+const LOG = require("../src/log") as typeof import("../src/log");
 
 A.install(bot);
 
@@ -318,6 +330,52 @@ async function main(): Promise<void> {
   await bot.handleUpdate(says(OWNER, "999999"));
   check((await S.getBalance(USER)) === 137, "сумма выше потолка не прошла");
   check(current(OWNER)!.text.includes("⊗"), "и объяснила, что не так");
+
+  // ── Селфи человека ─────────────────────────────────────────────
+  // Жалоба «кадр не похож» разбирается только тем, что человек прислал.
+  // С экрана сумм обратно на карточку: суммы → причины → карточка.
+  await press(OWNER, "Назад");
+  await press(OWNER, "Назад");
+  check(!has(OWNER, "Селфи"), "селфи нет — кнопки просмотра тоже нет");
+
+  await S.reservePhotoSlot(USER);
+  await S.addPhotoUrl(USER, "https://kie.test/a.jpg");
+  await S.reservePhotoSlot(USER);
+  await S.addPhotoUrl(USER, "https://kie.test/b.jpg");
+  await press(OWNER, "Обновить");
+  check(has(OWNER, "Селфи · 2"), "селфи появились — появилась и кнопка со счётом");
+
+  const beforeAlbum = chat.filter((m) => m.chat === OWNER).length;
+  await press(OWNER, "Селфи · 2");
+  show("Посмотрели селфи");
+  check(
+    chat.some((m) => m.chat === OWNER && m.text.includes("Селфи @newname")),
+    "альбом ушёл админу отдельным объектом"
+  );
+  check(
+    chat.filter((m) => m.chat === OWNER).length === beforeAlbum + 1,
+    "альбом и переехавшая карточка, а не два экрана"
+  );
+  check(current(OWNER)!.text.includes("Баланс"), "карточка встала под альбомом");
+  check(counters.admin_photos_shown === 1, "просмотр чужих селфи посчитан");
+  check(
+    !chat.some((m) => m.chat === USER && m.text.includes("Селфи")),
+    "человеку про просмотр не написали");
+
+  // ── Здоровье ────────────────────────────────────────────────────
+  // Логи Vercel на бесплатном тарифе живут час, а вопрос «что вчера
+  // ломалось» задают на следующий день — поэтому ошибка обязана лечь в своё кольцо.
+  LOG.error("kie.failed", new Error("422 model name not supported"), { chatId: USER });
+  await new Promise((r) => setTimeout(r, 10));
+  check((await L.errorsCount()) === 1, "ошибка легла в кольцо, а не только в консоль");
+
+  await press(OWNER, "Назад");
+  await press(OWNER, "Назад");
+  await press(OWNER, "Здоровье");
+  show("Здоровье");
+  const healthScreen = current(OWNER)!;
+  check(healthScreen.text.includes("Очередь"), "экран здоровья открылся");
+  check(healthScreen.text.includes("kie.failed"), "и показал последнюю ошибку");
 
   // Второй админ из ADMIN_IDS видит то же самое.
   await bot.handleUpdate(command(HELPER, "/admin"));

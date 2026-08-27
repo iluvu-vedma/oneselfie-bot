@@ -49,6 +49,26 @@ export function selfies(n: number): string {
   return plural("unit.selfie", n);
 }
 
+export function tasks(n: number): string {
+  return plural("unit.task", n);
+}
+
+/**
+ * «42 секунды», «7 минут», «3 часа». Только для админки: человеку длительности
+ * нигде не показывают.
+ *
+ * Единица выбирается по величине, а не пишется в вызове: время кадра меряется
+ * секундами, возраст зависшей очереди — часами, и один и тот же экран обязан
+ * прочитаться в обоих случаях. Ноль — прочерк, а не «0 секунд»: нечего мерить,
+ * значит нечего и утверждать.
+ */
+export function dur(ms: number): string {
+  if (ms <= 0) return t("common.none");
+  if (ms < 60_000) return plural("unit.second", Math.max(1, Math.round(ms / 1000)));
+  if (ms < 60 * 60_000) return plural("unit.minute", Math.round(ms / 60_000));
+  return plural("unit.hour", Math.round(ms / (60 * 60_000)));
+}
+
 export function modelName(id: ModelId): string {
   return t(`model.${id}.name`);
 }
@@ -113,6 +133,8 @@ export const CB = {
   genPhoto: "gen:photo",
   genText: "gen:text",
   genReset: "gen:reset",
+  /** Показать присланные селфи альбомом. Модель в адрес не кладём: она в состоянии. */
+  genPhotos: "gen:photos",
   pay: (m: PayMethod) => `pay:${m}`,
   buy: (m: PayMethod, tier: number) => `buy:${m}:${tier}`,
 
@@ -214,8 +236,16 @@ export function uploadKeyboard(id: ModelId): InlineKeyboard {
   return back(kb, CB.model(id));
 }
 
+/**
+ * «Показать» и «Заменить» — пара равнозначных второстепенных действий, поэтому
+ * они в одном ряду. Лейблы короткие нарочно: что именно показать и заменить,
+ * сказано заголовком экрана («Принял 2 селфи»), и повторять это на кнопке
+ * значит разорвать ряд переносом на узком экране.
+ */
 export function promptKeyboard(id: ModelId): InlineKeyboard {
-  const kb = new InlineKeyboard().text(t("button.replacePhoto"), CB.genReset);
+  const kb = new InlineKeyboard()
+    .text(t("button.showPhotos"), CB.genPhotos)
+    .text(t("button.replacePhoto"), CB.genReset);
   urlRow(kb, t("button.prompts"), PROMPTS_CHANNEL_URL);
   return back(kb, CB.model(id));
 }
@@ -303,8 +333,12 @@ export const ACB = {
   fails: "adm:fails",
   users: "adm:users",
   find: "adm:find",
+  /** Очередь, скорость и отказы прямо сейчас. */
+  health: "adm:health",
   /** Карточка человека. */
   card: (id: number) => `adm:u:${id}`,
+  /** Селфи человека альбомом: разбор жалобы «кадр не похож» начинается с них. */
+  photos: (id: number) => `adm:p:${id}`,
   /** За что начисляем. */
   reason: (id: number) => `adm:r:${id}`,
   /** Сколько. */
@@ -316,6 +350,7 @@ export const ACB = {
     `adm:g:${id}:${reason}:${amount}`,
 
   CARD_RE: /^adm:u:(\d+)$/,
+  PHOTOS_RE: /^adm:p:(\d+)$/,
   REASON_RE: /^adm:r:(\d+)$/,
   AMOUNT_RE: new RegExp(`^adm:s:(\\d+):${REASONS}$`),
   CUSTOM_RE: new RegExp(`^adm:c:(\\d+):${REASONS}$`),

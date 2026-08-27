@@ -8,8 +8,9 @@ import {
 import { Ref, modelRef, move } from "./flow";
 import { esc, t } from "./i18n";
 import { recordInfo } from "./kie";
-import { bump, k, redis } from "./kv";
+import { bump, k, measure, redis } from "./kv";
 import * as ledger from "./ledger";
+import * as log from "./log";
 import { notifyOwner } from "./owner";
 import { clip } from "./prompt";
 import { bot } from "./telegram";
@@ -63,6 +64,13 @@ export async function deliverTask(
   await bump("frame_delivered");
   await bump("sparks_spent", task.cost);
 
+  // Время кадра меряется здесь, а не в `startGeneration`: списание и выдача
+  // происходят в разных процессах, и единственное, что их связывает, — это
+  // отметка внутри самой задачи.
+  const took = Date.now() - task.createdAt;
+  await measure("gen", took);
+  log.info("frame.delivered", { taskId, chatId: task.chatId, model: task.model, ms: took });
+
   await move(task.chatId, await where(task), {
     notice: t("notice.frame", { price: sparks(task.cost) }),
   });
@@ -101,7 +109,7 @@ async function sendPrompt(chatId: number, prompt: string): Promise<void> {
       // Кадр уже прозвенел — описание приходит следом молча.
       disable_notification: true,
     })
-    .catch((e) => console.error("prompt note failed", e));
+    .catch((e) => log.error("frame.promptNote", e, { chatId }));
 }
 
 async function sendPhoto(chatId: number, imageUrl: string, caption?: string): Promise<void> {
@@ -151,6 +159,14 @@ export async function refundTask(
   });
 
   const fails = await bumpFails(task.chatId);
+  log.warn("frame.refunded", {
+    taskId,
+    chatId: task.chatId,
+    model: task.model,
+    cost: task.cost,
+    reason,
+    fails,
+  });
   await notifyOwner(
     `Генерация ${taskId} (${task.model ?? "?"}) у ${task.chatId} провалилась (${reason}). ` +
       `Вернул ${task.cost}. Подряд неудач: ${fails}.`
@@ -169,7 +185,7 @@ export async function refundTask(
       );
     }
   } catch (e) {
-    console.error("refund notify failed", e);
+    log.error("refund.notify", e, { chatId: task.chatId });
   }
 }
 

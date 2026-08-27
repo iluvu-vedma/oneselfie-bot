@@ -11,6 +11,7 @@ import { t } from "./i18n";
 import { createTask } from "./kie";
 import { bump } from "./kv";
 import * as ledger from "./ledger";
+import * as log from "./log";
 import { notifyOwner } from "./owner";
 import { buildPrompt } from "./prompt";
 import * as screens from "./screens";
@@ -184,6 +185,9 @@ export async function startGeneration(chatId: number, userPrompt: string): Promi
   }
 
   await ledger.record(chatId, "spend", -cost, modelName(model));
+  // Модель и цена дописываются в текущее событие: всё, что залогируется ниже,
+  // — поход в kie, отказ, возврат — придёт в ленту уже с ними.
+  log.note({ model, cost, photos: photos.length });
   await draw(chatId, { id: "busy" });
   await bot.api.sendChatAction(chatId, "upload_photo").catch(() => {});
 
@@ -216,6 +220,9 @@ export async function startGeneration(chatId: number, userPrompt: string): Promi
   }
 
   await store.createTaskRecord(taskId, chatId, model, userPrompt, cost, lock);
+  // Длина промпта, а не сам промпт: описание кадра — личное, а «пусто или нет»
+  // и «не упёрлись ли в лимит» из длины видно.
+  log.info("gen.started", { taskId, prompt: userPrompt.length });
   await bump(`gen_${model}`);
   // Воронка меряется людьми: сороковой кадр одного человека — не сороковой дошедший.
   if (await store.markGenerated(chatId)) await bump("gen_users");

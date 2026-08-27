@@ -1,6 +1,7 @@
 import {
   KIE_API_KEY,
   KIE_BASE_URL,
+  KIE_TIMEOUT_MS,
   KIE_UPLOAD_BASE_URL,
   MODELS,
   MODEL_ASPECT_RATIO,
@@ -8,6 +9,8 @@ import {
   MODEL_RESOLUTION,
   ModelId,
 } from "./config";
+import { bump, measure } from "./kv";
+import * as log from "./log";
 
 function headers(): Record<string, string> {
   if (!KIE_API_KEY) throw new Error("KIE_API_KEY is unset");
@@ -45,28 +48,68 @@ const RETRIES = 2;
 /** Пауза перед повтором. Растёт, чтобы не добивать лимит своими же ретраями. */
 const BACKOFF_MS = 600;
 
+/**
+ * Запрос с потолком ожидания. Без него зависшее соединение держит функцию до
+ * платформенного лимита, а с ним человек получает внятный отказ и свои искры
+ * обратно за двадцать секунд.
+ */
+async function fetchWithTimeout(url: string, init: RequestInit): Promise<Response> {
+  const abort = new AbortController();
+  const timer = setTimeout(() => abort.abort(), KIE_TIMEOUT_MS);
+  try {
+    return await fetch(url, { ...init, signal: abort.signal });
+  } catch (e) {
+    // Причина обрыва в логе должна называться своим именем: «оборвалось само»
+    // и «мы не дождались» чинятся по-разному.
+    if (abort.signal.aborted) throw new Error(`kie ${url}: нет ответа за ${KIE_TIMEOUT_MS} мс`);
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 async function kieFetch(
   path: string,
   init: RequestInit,
   baseUrl = KIE_BASE_URL,
   retry: Retry = "never"
 ): Promise<any> {
+  // Имя запроса без параметров: `?taskId=...` разнёс бы один и тот же вызов
+  // на тысячу разных строк в логе и на тысячу счётчиков в KV.
+  const name = path.split("?")[0];
   let last = "";
+
   for (let attempt = 0; ; attempt++) {
-    const res = await fetch(`${baseUrl}${path}`, init);
+    const ms = log.timer();
+    const res = await fetchWithTimeout(`${baseUrl}${path}`, init);
     const text = await res.text();
     let body: any;
     try {
       body = JSON.parse(text);
     } catch {
+      log.error("kie.notJson", `${res.status}: ${text.slice(0, 200)}`, { path: name });
       throw new Error(`kie ${path}: не JSON (${res.status}): ${text.slice(0, 300)}`);
     }
 
     const code = codeOf(res.status, body);
-    if (res.ok && code === 200) return body;
+    const took = ms();
+    await measure("kie", took);
 
+    if (res.ok && code === 200) {
+      log.info("kie.ok", { path: name, ms: took, attempt: attempt + 1 });
+      return body;
+    }
+
+    // Общий счётчик и счётчик по коду: первый показывает экран здоровья,
+    // второй отвечает на вопрос, что именно за отказ.
+    await Promise.all([bump("kie_err"), bump(`kie_err_${code}`)]);
     last = `kie ${path}: ${code} ${body.msg ?? ""}`.trim();
-    if (attempt >= RETRIES || !retryable(code, retry)) throw new Error(last);
+
+    if (attempt >= RETRIES || !retryable(code, retry)) {
+      log.error("kie.failed", last, { path: name, code, ms: took, attempt: attempt + 1 });
+      throw new Error(last);
+    }
+    log.warn("kie.retry", { path: name, code, ms: took, attempt: attempt + 1 });
     await new Promise((r) => setTimeout(r, BACKOFF_MS * (attempt + 1) * (attempt + 1)));
   }
 }
