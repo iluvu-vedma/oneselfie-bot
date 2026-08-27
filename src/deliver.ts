@@ -1,6 +1,7 @@
 import { InputFile } from "grammy";
 import {
   FAILS_BEFORE_ALERT,
+  SUPPORT_URL,
   SWEEP_AFTER_SEC,
   TEXT_LIMIT,
   TIMEOUT_SEC,
@@ -174,7 +175,7 @@ export async function refundTask(
 
   const notice =
     fails >= FAILS_BEFORE_ALERT
-      ? t("notice.repeatedFails")
+      ? repeatedFails()
       : t("notice.refund", { amount: sparks(task.cost) });
 
   try {
@@ -187,6 +188,21 @@ export async function refundTask(
   } catch (e) {
     log.error("refund.notify", e, { chatId: task.chatId });
   }
+}
+
+/**
+ * Три сбоя подряд — это уже не «попробуй ещё раз», а разговор с человеком.
+ * Кнопки поддержки на экране модели нет и не будет: она нужна раз в жизни,
+ * а мозолила бы глаза каждый заход. Поэтому адрес едет прямо в строке.
+ *
+ * Пустой SUPPORT_URL — «напиши мне» превращается в обещание без адреса,
+ * поэтому текст меняется целиком. Владелец о сбое всё равно уже знает:
+ * notifyOwner выше срабатывает независимо от ссылки.
+ */
+function repeatedFails(): string {
+  return SUPPORT_URL
+    ? t("notice.repeatedFails.support", { url: SUPPORT_URL })
+    : t("notice.repeatedFails.plain");
 }
 
 /** Чем закончился разбор одной задачи. Крон складывает из этого отчёт. */
