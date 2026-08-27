@@ -17,23 +17,58 @@ function headers(): Record<string, string> {
   };
 }
 
+/**
+ * Что можно повторить после отказа.
+ *
+ * `throttle` — только 429. Лимит kie (20 запросов на 10 секунд) отбивает запрос
+ * ДО очереди, поэтому повтор не создаст второй задачи. А вот 500 значит «не
+ * знаю»: задача могла быть создана, ответ — потерян, и повтор списал бы деньги
+ * дважды. Дешевле вернуть искры человеку, чем заплатить kie за два кадра.
+ *
+ * `always` — запрос идемпотентный: чтение статуса или заливка файла под тем же
+ * именем. Повторять безопасно.
+ */
+type Retry = "never" | "throttle" | "always";
+
+/** kie отвечает 200 даже на ошибку, настоящий код лежит в теле. Смотрим на оба. */
+function codeOf(status: number, body: any): number {
+  return typeof body?.code === "number" ? body.code : status;
+}
+
+function retryable(code: number, mode: Retry): boolean {
+  if (mode === "never") return false;
+  if (code === 429) return true;
+  return mode === "always" && code >= 500;
+}
+
+const RETRIES = 2;
+/** Пауза перед повтором. Растёт, чтобы не добивать лимит своими же ретраями. */
+const BACKOFF_MS = 600;
+
 async function kieFetch(
   path: string,
   init: RequestInit,
-  baseUrl = KIE_BASE_URL
+  baseUrl = KIE_BASE_URL,
+  retry: Retry = "never"
 ): Promise<any> {
-  const res = await fetch(`${baseUrl}${path}`, init);
-  const text = await res.text();
-  let body: any;
-  try {
-    body = JSON.parse(text);
-  } catch {
-    throw new Error(`kie ${path}: не JSON (${res.status}): ${text.slice(0, 300)}`);
+  let last = "";
+  for (let attempt = 0; ; attempt++) {
+    const res = await fetch(`${baseUrl}${path}`, init);
+    const text = await res.text();
+    let body: any;
+    try {
+      body = JSON.parse(text);
+    } catch {
+      throw new Error(`kie ${path}: не JSON (${res.status}): ${text.slice(0, 300)}`);
+    }
+
+    const code = codeOf(res.status, body);
+    if (res.ok && code === 200) return body;
+
+    last = `kie ${path}: ${code} ${body.msg ?? ""}`.trim();
+    if (attempt >= RETRIES || !retryable(code, retry)) throw new Error(last);
+    await new Promise((r) => setTimeout(r, BACKOFF_MS * (attempt + 1) * (attempt + 1)));
   }
-  if (!res.ok || (body.code !== undefined && body.code !== 200)) {
-    throw new Error(`kie ${path}: ${body.code ?? res.status} ${body.msg ?? ""}`.trim());
-  }
-  return body;
 }
 
 /**
@@ -56,7 +91,9 @@ export async function uploadImage(
         fileName,
       }),
     },
-    KIE_UPLOAD_BASE_URL
+    KIE_UPLOAD_BASE_URL,
+    // Имя файла уникальное, повтор просто перезапишет тот же объект.
+    "always"
   );
   const url = body?.data?.downloadUrl;
   if (!url) throw new Error("kie upload: нет downloadUrl");
@@ -64,10 +101,55 @@ export async function uploadImage(
 }
 
 /**
+ * Схема `input` у каждого вендора своя, общей не существует — поле с
+ * референсами называется по-разному, а разрешение задаётся то `resolution`,
+ * то `quality`. Отправишь чужое поле — 422 либо, что хуже, кадр молча не по
+ * тем селфи.
+ *
+ * Без референсов поле с картинками не отправляется вовсе: пустой массив
+ * некоторые модели принимают за «работай по картинке» и отдают мусор.
+ */
+function buildInput(model: ModelId, prompt: string, imageUrls: string[]): Record<string, unknown> {
+  const photos = imageUrls.length > 0;
+
+  switch (MODELS[model].family) {
+    case "nano":
+      return {
+        prompt,
+        ...(photos ? { image_input: imageUrls } : {}),
+        aspect_ratio: MODEL_ASPECT_RATIO,
+        resolution: MODEL_RESOLUTION,
+        output_format: MODEL_OUTPUT_FORMAT,
+      };
+
+    // `quality` вместо `resolution`, `jpeg` вместо `jpg`, потолок — 2K.
+    case "seedream":
+      return {
+        prompt,
+        ...(photos ? { image_urls: imageUrls } : {}),
+        aspect_ratio: MODEL_ASPECT_RATIO,
+        quality: MODEL_RESOLUTION === "1K" ? "basic" : "high",
+        output_format: MODEL_OUTPUT_FORMAT === "jpg" ? "jpeg" : MODEL_OUTPUT_FORMAT,
+      };
+
+    // Формат выхода не выбирается вовсе. `aspect_ratio` обязателен вместе с
+    // `resolution`: на «auto» модель отдаёт только 1K.
+    case "gpt":
+      return {
+        prompt,
+        ...(photos ? { input_urls: imageUrls } : {}),
+        aspect_ratio: MODEL_ASPECT_RATIO,
+        resolution: MODEL_RESOLUTION,
+      };
+  }
+}
+
+/**
  * Ставит задачу в очередь. Синхронно ждать картинку внутри вебхука невозможно.
  *
- * Без референсов `image_input` не отправляется вовсе: пустой массив некоторые
- * модели принимают за «работай по картинке» и отдают мусор.
+ * Слаг зависит от режима: у seedream и gpt-image кадр по описанию и кадр по
+ * фото — это две разные модели, и слаг обязан ехать вместе с наличием
+ * референсов. У nano-banana слаг один на оба режима.
  */
 export async function createTask(
   model: ModelId,
@@ -75,21 +157,21 @@ export async function createTask(
   imageUrls: string[],
   callBackUrl: string
 ): Promise<string> {
-  const body = await kieFetch("/api/v1/jobs/createTask", {
-    method: "POST",
-    headers: headers(),
-    body: JSON.stringify({
-      model: MODELS[model].kieId,
-      callBackUrl,
-      input: {
-        prompt,
-        ...(imageUrls.length > 0 ? { image_input: imageUrls } : {}),
-        aspect_ratio: MODEL_ASPECT_RATIO,
-        resolution: MODEL_RESOLUTION,
-        output_format: MODEL_OUTPUT_FORMAT,
-      },
-    }),
-  });
+  const info = MODELS[model];
+  const body = await kieFetch(
+    "/api/v1/jobs/createTask",
+    {
+      method: "POST",
+      headers: headers(),
+      body: JSON.stringify({
+        model: imageUrls.length > 0 ? info.kiePhoto : info.kieText,
+        callBackUrl,
+        input: buildInput(model, prompt, imageUrls),
+      }),
+    },
+    KIE_BASE_URL,
+    "throttle"
+  );
   const taskId = body?.data?.taskId;
   if (!taskId) throw new Error("kie createTask: нет taskId");
   return String(taskId);
@@ -107,19 +189,45 @@ export interface TaskInfo {
 export async function recordInfo(taskId: string): Promise<TaskInfo> {
   const body = await kieFetch(
     `/api/v1/jobs/recordInfo?taskId=${encodeURIComponent(taskId)}`,
-    { method: "GET", headers: headers() }
+    { method: "GET", headers: headers() },
+    KIE_BASE_URL,
+    "always"
   );
   return parseTaskData(body?.data);
 }
 
-/** Общий разбор для коллбэка и для recordInfo — форма data одинаковая. */
+/**
+ * Состояние задачи. Форматов у kie два: jobs API кладёт `state`, а описанный
+ * в Webhook Security коллбэк — `callbackType`. Читаем оба: угадывать, какой
+ * придёт сегодня, дороже, чем разобрать оба.
+ */
+function stateOf(data: any): TaskState {
+  if (typeof data?.state === "string") return data.state as TaskState;
+  const type = String(data?.callbackType ?? "");
+  if (type === "task_completed") return "success";
+  if (type === "task_failed") return "fail";
+  return "waiting";
+}
+
+/** Общий разбор для коллбэка и для recordInfo. */
 export function parseTaskData(data: any): TaskInfo {
-  const state = (data?.state ?? "waiting") as TaskState;
+  const failMsg = data?.failMsg ?? data?.fail_msg;
   return {
-    state,
-    urls: extractUrls(data?.resultJson),
-    failMsg: data?.failMsg ? String(data.failMsg) : undefined,
+    state: stateOf(data),
+    urls: extractUrls(data?.resultJson ?? data?.result_json),
+    failMsg: failMsg ? String(failMsg) : undefined,
   };
+}
+
+/**
+ * Идентификатор задачи из тела коллбэка. Лежит то в `data.taskId`, то в
+ * `data.task_id`, то верхним уровнем — зависит от формата, который kie
+ * прислал. Пустая строка значит «это не про задачу».
+ */
+export function taskIdOf(body: any): string {
+  const data = body?.data ?? {};
+  const id = data.taskId ?? data.task_id ?? body?.taskId ?? body?.task_id;
+  return id ? String(id) : "";
 }
 
 function extractUrls(resultJson: unknown): string[] {

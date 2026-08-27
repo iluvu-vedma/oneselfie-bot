@@ -21,10 +21,13 @@ import {
   originRef,
   startGeneration,
 } from "./flow";
+import { install as installAdmin } from "./admin";
+import { catchUp } from "./deliver";
 import { isNotModified } from "./hub";
 import { t } from "./i18n";
 import { bump } from "./kv";
 import { uploadImage } from "./kie";
+import { record } from "./ledger";
 import { isOwner, notifyOwner } from "./owner";
 import { check, normalize } from "./prompt";
 import { buildStats } from "./stats";
@@ -37,14 +40,15 @@ import {
   ensureUser,
   getModel,
   isGenerating,
+  markPaid,
   markPhotosReady,
   releasePhotoSlot,
   reservePhotoSlot,
   setModel,
-  setName,
   setSource,
   setStatus,
   setTopupFrom,
+  touchUser,
 } from "./store";
 import {
   CB,
@@ -66,6 +70,30 @@ export { bot };
  * Новое сообщение отправляется ровно в четырёх местах: картинка-пример при
  * первом старте, счёт Telegram, готовый кадр и статистика владельца.
  */
+
+/**
+ * Добор кадра по действию человека. Коллбэк kie мог не дойти, а крон на
+ * бесплатном Vercel ходит раз в сутки — столько ждать кадр с уже списанными
+ * искрами нельзя. Любое действие в боте становится поводом спросить у kie,
+ * готов ли результат.
+ *
+ * Стоит ПОСЛЕ `next()` осознанно: обработчик успевает нарисовать свой экран,
+ * и только потом под ним появляется кадр, а экран переезжает вниз сам.
+ * Наоборот — обработчик станет править сообщение, которое выдача уже удалила.
+ *
+ * Сбой добора не должен ронять обработку апдейта: человек нажал кнопку и своё
+ * получил, а недошедший кадр подберёт следующий заход или крон.
+ */
+bot.use(async (ctx, next) => {
+  await next();
+  const chatId = ctx.chat?.id;
+  if (chatId === undefined) return;
+  try {
+    await catchUp(chatId);
+  } catch (e) {
+    console.error("catchUp failed", chatId, e);
+  }
+});
 
 // ── Команды ──────────────────────────────────────────────────────────────────
 /**
@@ -116,6 +144,13 @@ bot.command("stats", async (ctx) => {
   if (!isOwner(ctx.chat.id)) return;
   await ctx.reply(await buildStats(), { parse_mode: "HTML" });
 });
+
+/**
+ * Админка. Ставится здесь, до разбора текста и фотографий: она перехватывает
+ * сообщения админа, когда ждёт от него id человека или сумму, и пропускает
+ * дальше всё остальное — админ такой же покупатель и делает такие же кадры.
+ */
+installAdmin(bot);
 
 // ── Навигация ────────────────────────────────────────────────────────────────
 
@@ -265,8 +300,12 @@ bot.on("message:successful_payment", async (ctx) => {
   const amount = sparksOf(pack, method);
   await credit(chatId, amount);
   await setStatus(chatId, "paid");
+  // Откуда взялись искры, видно только из журнала: баланс — просто число.
+  await record(chatId, "buy", amount, payloadOf(method, pack.tier));
   await bump(`paid_${method}_${pack.tier}`);
   await bump("sparks_sold", amount);
+  // Воронка меряется людьми: второй пакет того же человека — не второй платящий.
+  if (await markPaid(chatId)) await bump("paid_users");
   if (method === "stars") await bump("stars_earned", priceOf(pack, method));
   await notifyOwner(
     `💸 ${chatId} купил пакет ${pack.tier} за ${priceOf(pack, method)} ` +
@@ -388,10 +427,14 @@ bot.on("message", async (ctx) => {
   await move(chatId, await currentRef(chatId), { notice: t("notice.notAPhoto") });
 });
 
-/** Имя нужно приветствию, а оно рисуется и вне входящего апдейта. */
+/**
+ * Имя нужно приветствию, а оно рисуется и вне входящего апдейта.
+ * Заодно запоминается юзернейм: искать человека в админке иначе, чем по
+ * числовому id, нечем — метода «дай id по юзернейму» у Bot API нет.
+ */
 async function remember(ctx: Context): Promise<void> {
-  const name = ctx.from?.first_name;
-  if (name && ctx.chat) await setName(ctx.chat.id, name);
+  if (!ctx.chat) return;
+  await touchUser(ctx.chat.id, ctx.from?.first_name, ctx.from?.username);
 }
 
 /** Источник пополнения из состояния — для экранов ниже topup, куда он не едет. */

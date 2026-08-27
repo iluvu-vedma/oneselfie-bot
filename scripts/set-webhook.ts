@@ -1,4 +1,10 @@
-import { BOT_TOKEN, PUBLIC_URL, TELEGRAM_WEBHOOK_SECRET } from "../src/config";
+import {
+  ADMIN_IDS,
+  BOT_TOKEN,
+  OWNER_CHAT_ID,
+  PUBLIC_URL,
+  TELEGRAM_WEBHOOK_SECRET,
+} from "../src/config";
 import { t } from "../src/i18n";
 
 async function main() {
@@ -21,17 +27,26 @@ async function main() {
   console.log(res);
 
   // Меню команд. Ставится здесь, а не в боте: на вебхуке это был бы лишний
-  // запрос к Telegram на каждом апдейте. /stats владельца в меню не место.
-  console.log(
-    await call("setMyCommands", {
-      commands: [
-        { command: "start", description: t("command.start") },
-        { command: "balance", description: t("command.balance") },
-        { command: "new", description: t("command.new") },
-        { command: "help", description: t("command.help") },
-      ],
-    })
-  );
+  // запрос к Telegram на каждом апдейте.
+  const commands = [
+    { command: "start", description: t("command.start") },
+    { command: "balance", description: t("command.balance") },
+    { command: "new", description: t("command.new") },
+    { command: "help", description: t("command.help") },
+  ];
+  console.log(await call("setMyCommands", { commands }));
+
+  // Админка не в общем меню, а в личном: Telegram умеет область видимости
+  // по чату. Иначе /admin висел бы в подсказках у всех — и его бы жали.
+  for (const chatId of [OWNER_CHAT_ID, ...ADMIN_IDS].filter(Boolean)) {
+    console.log(
+      chatId,
+      await call("setMyCommands", {
+        commands: [...commands, { command: "admin", description: t("command.admin") }],
+        scope: { type: "chat", chat_id: chatId },
+      })
+    );
+  }
 
   console.log(await call("getWebhookInfo", {}));
 }

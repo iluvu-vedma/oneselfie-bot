@@ -1,8 +1,15 @@
 import { InputFile } from "grammy";
-import { CAPTION_LIMIT, FAILS_BEFORE_ALERT } from "./config";
+import {
+  CAPTION_LIMIT,
+  FAILS_BEFORE_ALERT,
+  SWEEP_AFTER_SEC,
+  TIMEOUT_SEC,
+} from "./config";
 import { Ref, modelRef, move } from "./flow";
 import { esc, t } from "./i18n";
+import { recordInfo } from "./kie";
 import { bump, k, redis } from "./kv";
+import * as ledger from "./ledger";
 import { notifyOwner } from "./owner";
 import { splitCaption } from "./prompt";
 import { bot } from "./telegram";
@@ -13,6 +20,8 @@ import {
   claimSend,
   credit,
   forgetPending,
+  getChatTask,
+  getTask,
   releaseGenLock,
   resetFails,
 } from "./store";
@@ -118,6 +127,17 @@ export async function refundTask(
   await releaseGenLock(task.chatId, task.lock);
   await bump("gen_failed");
   await bump("sparks_refunded", task.cost);
+  // Возврат — в историю человека, сам сбой — в общий лог. Первое объясняет
+  // баланс, второе отвечает на вопрос, кому вообще положена компенсация.
+  await ledger.record(task.chatId, "back", task.cost, reason);
+  await ledger.logFail({
+    at: Date.now(),
+    chatId: task.chatId,
+    model: task.model,
+    cost: task.cost,
+    reason,
+    back: true,
+  });
 
   const fails = await bumpFails(task.chatId);
   await notifyOwner(
@@ -140,4 +160,57 @@ export async function refundTask(
   } catch (e) {
     console.error("refund notify failed", e);
   }
+}
+
+/** Чем закончился разбор одной задачи. Крон складывает из этого отчёт. */
+export type Settled = "delivered" | "refunded" | "pending" | "gone";
+
+/**
+ * Разбор одной задачи: кадр приехал — отдать, провалился или висит дольше
+ * таймаута — вернуть искры. Один и тот же код на два входа, крон и добор по
+ * действию человека: расходиться этим двум путям нельзя, иначе кадр выдаётся
+ * по-разному в зависимости от того, кто первым спохватился.
+ *
+ * Ходить в kie раньше SWEEP_AFTER_SEC незачем: коллбэк ещё в дороге, а лимит
+ * kie — 20 запросов на 10 секунд, и тратить их на «ещё рисуется» глупо.
+ */
+export async function settleTask(taskId: string, now = Date.now()): Promise<Settled> {
+  const task = await getTask(taskId);
+  if (!task || task.sent || task.refunded) {
+    await forgetPending(taskId);
+    return "gone";
+  }
+
+  if (now - task.createdAt > TIMEOUT_SEC * 1000) {
+    await refundTask(taskId, task, t("admin.fail.timeout"));
+    return "refunded";
+  }
+  if (now - task.createdAt < SWEEP_AFTER_SEC * 1000) return "pending";
+
+  const info = await recordInfo(taskId);
+  if (info.state === "success" && info.urls.length > 0) {
+    await deliverTask(taskId, task, info.urls[0]);
+    return "delivered";
+  }
+  if (info.state === "fail") {
+    await refundTask(taskId, task, info.failMsg ?? t("admin.fail.generation"));
+    return "refunded";
+  }
+  return "pending";
+}
+
+/**
+ * Добор по действию человека. Коллбэк мог не дойти, а крон на бесплатном
+ * Vercel ходит раз в сутки — ждать его с уже списанными искрами человек не
+ * должен. Любое действие в боте становится поводом спросить у kie, готов ли
+ * кадр.
+ *
+ * Вызывается ПОСЛЕ обработчика, а не до: обработчик рисует свой экран, и уже
+ * под ним появляется кадр, а экран переезжает вниз сам. Сделай наоборот —
+ * обработчик перерисует сообщение, которое выдача только что удалила.
+ */
+export async function catchUp(chatId: number): Promise<void> {
+  const taskId = await getChatTask(chatId);
+  if (!taskId) return;
+  await settleTask(taskId);
 }

@@ -49,7 +49,7 @@ export interface Screen {
 }
 
 /** Пустая строка — единственный инструмент вертикального ритма. */
-function compose(...blocks: (string | string[] | undefined | false)[]): string {
+export function compose(...blocks: (string | string[] | undefined | false)[]): string {
   return blocks
     .filter((b): b is string | string[] => Boolean(b))
     .map((b) => (Array.isArray(b) ? b.join("\n") : b))

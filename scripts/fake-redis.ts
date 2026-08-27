@@ -55,6 +55,12 @@ export class FakeRedis {
     if (e) e.exp = Date.now() + sec * 1000;
     return 1;
   }
+  /** Секунд до смерти ключа. -1 — живёт вечно, -2 — ключа нет. Как в Redis. */
+  async ttl(key: string) {
+    const e = this.live(key);
+    if (e === undefined) return -2;
+    return e.exp === undefined ? -1 : Math.ceil((e.exp - Date.now()) / 1000);
+  }
   async incrby(key: string, by: number) {
     const cur = Number((await this.get(key)) ?? 0);
     const next = cur + by;
@@ -99,12 +105,30 @@ export class FakeRedis {
     h[field] = Number(h[field] ?? 0) + by;
     return h[field];
   }
-  async rpush(key: string, ...vals: any[]) {
+  private list(key: string): any[] {
     const e = this.live(key);
-    const list: any[] = e ? e.v : [];
-    if (!e) this.m.set(key, { v: list });
+    if (e) return e.v;
+    const v: any[] = [];
+    this.m.set(key, { v });
+    return v;
+  }
+  async rpush(key: string, ...vals: any[]) {
+    const list = this.list(key);
     list.push(...vals);
     return list.length;
+  }
+  /** Журналы растут вверх: новое сверху, старое подрезается с хвоста. */
+  async lpush(key: string, ...vals: any[]) {
+    const list = this.list(key);
+    list.unshift(...vals);
+    return list.length;
+  }
+  async ltrim(key: string, start: number, stop: number) {
+    const list = this.list(key);
+    const kept = stop === -1 ? list.slice(start) : list.slice(start, stop + 1);
+    list.length = 0;
+    list.push(...kept);
+    return "OK";
   }
   async lrange(key: string, start: number, stop: number) {
     const list: any[] = this.live(key)?.v ?? [];
@@ -113,19 +137,42 @@ export class FakeRedis {
   async llen(key: string) {
     return (this.live(key)?.v ?? []).length;
   }
-  async zadd(key: string, item: { score: number; member: string }) {
+  /** Понимает обе формы: `zadd(key, item)` и `zadd(key, { nx: true }, item)`. */
+  async zadd(
+    key: string,
+    a: { nx?: true } | { score: number; member: string },
+    b?: { score: number; member: string }
+  ) {
+    const opts = b === undefined ? undefined : (a as { nx?: true });
+    const item = (b ?? a) as { score: number; member: string };
     const e = this.live(key);
     const z: Map<string, number> = e ? e.v : new Map();
     if (!e) this.m.set(key, { v: z });
+    if (opts?.nx && z.has(item.member)) return null;
     z.set(item.member, item.score);
     return 1;
   }
-  async zrange(key: string, min: number, max: number, _o?: { byScore?: boolean }) {
+  /**
+   * Без `byScore` это диапазон по порядку, а не по счёту — на этом стоит
+   * список последних людей, и подменять одно другим нельзя.
+   */
+  async zrange(
+    key: string,
+    min: number,
+    max: number,
+    o?: { byScore?: boolean; rev?: boolean }
+  ) {
     const z: Map<string, number> = this.live(key)?.v ?? new Map();
-    return [...z.entries()]
-      .filter(([, s]) => s >= min && s <= max)
-      .sort((a, b) => a[1] - b[1])
-      .map(([mem]) => mem);
+    let items = [...z.entries()].sort((a, b) => a[1] - b[1]);
+    if (o?.rev) items.reverse();
+    items = o?.byScore
+      ? items.filter(([, s]) => s >= min && s <= max)
+      : items.slice(min, max === -1 ? undefined : max + 1);
+    return items.map(([mem]) => mem);
+  }
+  async zcard(key: string) {
+    const z: Map<string, number> = this.live(key)?.v ?? new Map();
+    return z.size;
   }
   async zrem(key: string, member: string) {
     const z: Map<string, number> = this.live(key)?.v ?? new Map();
