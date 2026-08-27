@@ -240,25 +240,29 @@ async function main(): Promise<void> {
 
   await D.deliverTask("task-1", (await S.getTask("task-1"))!, "https://kie.test/out.jpg");
   show("Кадр выдан");
-  check(chat.length === 2, "кадр — отдельный объект, экран переехал под него");
-  check(chat[0].kind === "photo", "кадр выше экрана");
-  check(chat[0].text.includes("<code>"), "промпт лежит под кадром — можно повторить");
+  check(chat.length === 3, "кадр, описание и экран под ними — три объекта ленты");
+  check(chat[0].kind === "photo", "кадр выше всех");
+  check(chat[0].text === t("frame.caption"), "подпись под кадром — одна строка, без промпта");
+  check(
+    chat[1].text.includes("<code>") && chat[1].text.includes("на крыше в вечернем городе"),
+    "описание — следующим сообщением, копируется одним тапом"
+  );
   check(screens().length === 1, "у кадра своей клавиатуры нет");
-  check(chat[1].text.includes("Nano Banana Pro"), "под кадром экран той же модели: повтор в 1 тап");
+  check(chat[2].text.includes("Nano Banana Pro"), "под кадром экран той же модели: повтор в 1 тап");
 
   await F.startGeneration(CHAT, "второй кадр");
   await D.refundTask("task-2", (await S.getTask("task-2"))!, "тест");
   show("Кадр провалился");
   check((await S.getBalance(CHAT)) === 550 - PRICE, "искры вернулись");
-  check(chat.length === 2, "возврат не добавил сообщений в ленту");
-  check(chat[1].text.startsWith("⊗"), "возврат виден первой строкой экрана");
+  check(chat.length === 3, "возврат не добавил сообщений в ленту");
+  check(chat[2].text.startsWith("⊗"), "возврат виден первой строкой экрана");
   check((await S.isGenerating(CHAT)) === false, "замок отпущен");
 
   kieDown = true;
   await F.startGeneration(CHAT, "третий кадр");
   show("kie недоступен");
   check((await S.getBalance(CHAT)) === 550 - PRICE, "искры не пропали");
-  check(chat.length === 2, "и здесь лента не выросла");
+  check(chat.length === 3, "и здесь лента не выросла");
   check((await S.isGenerating(CHAT)) === false, "замок отпущен и после отказа kie");
 
   // Режим «словами»: фото остались в состоянии, но в kie не уходят.

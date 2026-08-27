@@ -1,8 +1,8 @@
 import { InputFile } from "grammy";
 import {
-  CAPTION_LIMIT,
   FAILS_BEFORE_ALERT,
   SWEEP_AFTER_SEC,
+  TEXT_LIMIT,
   TIMEOUT_SEC,
 } from "./config";
 import { Ref, modelRef, move } from "./flow";
@@ -11,7 +11,7 @@ import { recordInfo } from "./kie";
 import { bump, k, redis } from "./kv";
 import * as ledger from "./ledger";
 import { notifyOwner } from "./owner";
-import { splitCaption } from "./prompt";
+import { clip } from "./prompt";
 import { bot } from "./telegram";
 import {
   TaskRecord,
@@ -32,8 +32,9 @@ import { sparks } from "./ui";
  * к нему возвращаются. Поэтому он уходит новым сообщением, без клавиатуры,
  * а экран сразу переезжает под него.
  *
- * Подпись — промпт целиком в <code>: по нему кадр повторяют, поэтому он должен
- * копироваться одним тапом, а не жить в истории чата выше.
+ * Подпись — одна строка: кадр смотрят и пересылают, и промпт в подписи этому
+ * мешает. Описание уходит следом отдельным сообщением — там его копируют одним
+ * тапом и повторяют кадр.
  *
  * Флаг sent ставится ДО отправки: из двух коллбэков kie дальше пройдёт один.
  */
@@ -72,25 +73,35 @@ async function where(task: TaskRecord): Promise<Ref> {
   return task.model === null ? modelRef(task.chatId) : { id: "model", model: task.model };
 }
 
-/** `<code>` вокруг подписи стоит 13 символов — лимит подписи уменьшается на них. */
-const CODE_OVERHEAD = "<code></code>".length;
+/** Длиннее — сворачивается в цитату: стена текста под кадром читается как мусор. */
+const FOLD_AFTER = 300;
 
 async function sendFrame(chatId: number, imageUrl: string, prompt: string): Promise<void> {
-  const { head, tail } = splitCaption(esc(prompt), CAPTION_LIMIT - CODE_OVERHEAD);
-  const caption = head ? `<code>${head}</code>` : undefined;
+  await sendPhoto(chatId, imageUrl, t("frame.caption"));
+  await sendPrompt(chatId, prompt);
+}
 
-  await sendPhoto(chatId, imageUrl, caption);
+/**
+ * Описание кадра. Отдельное сообщение, а не подпись: по нему кадр повторяют,
+ * поэтому оно должно копироваться одним тапом и не мешать смотреть на кадр.
+ *
+ * Не отправилось — кадр всё равно выдан, и делать вид, что генерация провалилась,
+ * нельзя. Поэтому ошибка уходит в лог, а не наверх.
+ */
+async function sendPrompt(chatId: number, prompt: string): Promise<void> {
+  const body = esc(prompt);
+  const key = body.length > FOLD_AFTER ? "frame.prompt.folded" : "frame.prompt.plain";
+  // Место под сам промпт — лимит минус обёртка. Считаем её из строки локали,
+  // а не константой: правка разметки не должна тихо ломать рез.
+  const room = TEXT_LIMIT - t(key, { prompt: "" }).length;
 
-  // Промпт не поместился в подпись — полный текст уходит следом, чтобы его
-  // всё-таки можно было скопировать целиком.
-  if (tail) {
-    await bot.api
-      .sendMessage(chatId, t("frame.fullPrompt", { prompt: tail }), {
-        parse_mode: "HTML",
-        disable_notification: true,
-      })
-      .catch((e) => console.error("full prompt failed", e));
-  }
+  await bot.api
+    .sendMessage(chatId, t(key, { prompt: clip(body, room) }), {
+      parse_mode: "HTML",
+      // Кадр уже прозвенел — описание приходит следом молча.
+      disable_notification: true,
+    })
+    .catch((e) => console.error("prompt note failed", e));
 }
 
 async function sendPhoto(chatId: number, imageUrl: string, caption?: string): Promise<void> {
