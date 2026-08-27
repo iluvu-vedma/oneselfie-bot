@@ -370,14 +370,10 @@ export const SUPPORT_URL = link(process.env.SUPPORT_URL);
  * в режиме «словами» лица нет и держать нечего.
  */
 export const PROMPT_PREFIX =
-  "Photorealistic photograph of the exact person shown in the reference images. " +
-  "Preserve their face, facial proportions, bone structure, eye shape and colour, " +
-  "nose, lips, skin tone, skin texture and hairline with absolute fidelity — the result " +
-  "must be unmistakably the same individual. Do not beautify, slim, de-age or stylise the face.";
+  "";
 
 export const PROMPT_SUFFIX =
-  "Natural skin texture with visible pores, sharp focus on the eyes, professional colour grading. " +
-  "No text, no logo, no watermark, no extra people, no distorted hands.";
+  "";
 
 // ── Админка ──────────────────────────────────────────────────────────────────
 /**

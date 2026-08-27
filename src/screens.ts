@@ -1,7 +1,6 @@
 import { InlineKeyboard } from "grammy";
 import {
   CHEAPEST_MODEL,
-  DEAREST_MODEL,
   MAX_PHOTOS,
   MODELS,
   MODEL_ORDER,
@@ -30,6 +29,7 @@ import {
   modelsKeyboard,
   money,
   packsKeyboard,
+  priceLine,
   promptKeyboard,
   rateLine,
   selfies,
@@ -81,19 +81,20 @@ export function home(s: HomeState): Screen {
     text: compose(
       s.notice,
       [t("home.hello", { name: esc(s.name ?? "") }), t("home.lead")],
-      [t("home.create.title"), t("home.create.body")],
       // Оффер начинается здесь, а не на экране оплаты: воронка стартует со входа,
       // и акция обязана дожить до неё, а не ждать, пока человек сам дойдёт.
+      //
+      // Блоков «Сделать кадр» и «Искры — валюта бота» тут больше нет: их заголовки
+      // слово в слово повторяли кнопки, стоящие на два сантиметра ниже.
       [
-        t("home.pay.title"),
-        t("home.pay.body", {
+        t("home.offer", {
           price: sparks(MODELS[CHEAPEST_MODEL].price),
           bonus: num(MAX_BONUS_FIAT),
         }),
+        // Баланс появляется, только когда он есть: «0 ✨» на входе выглядит как долг.
+        ...(s.balance > 0 ? [balanceOf(s.balance)] : []),
+        t("home.calm"),
       ],
-      // Баланс появляется, только когда он есть: «0 ✨» на входе выглядит как долг.
-      s.balance > 0 && balanceOf(s.balance),
-      t("home.calm"),
       t("common.bridge")
     ),
     reply_markup: homeKeyboard(),
@@ -107,32 +108,33 @@ export interface ModelsState extends Notice {
 }
 
 /**
- * Выбор делается по строке «бери, когда», а не по названию: у моделей разная
- * цена, и человек сравнивает не характеристики, а «за что я плачу больше».
+ * Модель выбирают не по названию, а по одной фразе «чем она берёт»: цена у всех
+ * разная, и человек сравнивает не характеристики, а «за что я плачу больше».
+ *
+ * Четыре модели — четыре строки одним блоком. Цену строка не повторяет: она уже
+ * стоит на кнопке, а до нажатия видна и там.
  */
 export function models(s: ModelsState): Screen {
-  const items = MODEL_ORDER.map((id) => [
-    t("models.item.line", {
+  const items = MODEL_ORDER.map((id) =>
+    t("models.item", {
       icon: MODELS[id].icon,
       name: modelName(id),
-      price: sparks(MODELS[id].price),
-    }),
-    t(`model.${id}.pick`),
-  ]);
+      pick: t(`model.${id}.pick`),
+    })
+  );
 
   return {
     text: compose(
       s.notice,
       [t("models.title"), t("models.lead")],
-      ...items,
-      // Абстрактная валюта переводится в кадры — по дешёвой модели и по флагману.
+      items,
+      // Абстрактная валюта переводится в кадры. По одной модели, а не по двум:
+      // вторая половина строки объясняла ровно то же самое второй раз.
       s.balance > 0
         ? t("models.balance", {
             balance: sparks(s.balance),
             cheap: frames(framesFor(s.balance, PRIMARY_MODEL)),
             cheapName: modelName(PRIMARY_MODEL),
-            dear: num(framesFor(s.balance, DEAREST_MODEL)),
-            dearName: modelName(DEAREST_MODEL),
           })
         : rateLine(),
       t("common.bridge")
@@ -151,26 +153,25 @@ export interface ModelState extends Notice {
 /**
  * Один шаблон на четыре модели. Строка `weak` — честное ограничение: четыре
  * одинаково прекрасные модели не объясняют разницу в цене, а ограничение объясняет.
+ * Она стоит вплотную к `about`, а не отдельным блоком: это одна мысль о модели,
+ * а не две.
+ *
+ * Строк «пришли селфи» и «опиши словами» тут нет: они дублировали две кнопки,
+ * стоящие прямо под текстом, и слово в слово.
  */
 export function model(s: ModelState): Screen {
   const info = MODELS[s.model];
   const needTopup = s.balance < info.price;
-  // Два способа — двумя строками, а не двумя блоками с заголовками: заголовки
-  // слово в слово повторяли кнопки, стоящие прямо под ними.
-  const ways = [info.photo && t("model.way.photo"), t("model.way.text")].filter(
-    (line): line is string => Boolean(line)
-  );
 
   return {
     text: compose(
       s.notice,
       [
-        t("models.item.plain", { icon: info.icon, name: modelName(s.model) }),
+        t("models.plain", { icon: info.icon, name: modelName(s.model) }),
         t(`model.${s.model}.about`),
+        t(`model.${s.model}.weak`),
       ],
-      ways,
-      contextLine(s.model, s.balance),
-      t(`model.${s.model}.weak`),
+      priceLine(s.model, s.balance),
       t("common.bridge")
     ),
     reply_markup: modelKeyboard(s.model, needTopup),
@@ -197,8 +198,9 @@ export function upload(s: UploadState): Screen {
       s.notice,
       [t("upload.title"), t("upload.body")],
       t("upload.howto"),
-      contextLine(s.model, s.balance),
-      t("upload.calm"),
+      // Ключевой факт и возражение — одним блоком: обе строки про одно и то же,
+      // про цену вопроса.
+      [contextLine(s.model, s.balance), t("upload.calm")],
       t("upload.bridge")
     ),
     reply_markup: uploadKeyboard(s.model),
@@ -218,10 +220,8 @@ export function prompt(s: PromptState): Screen {
   return {
     text: compose(
       s.notice,
-      [
-        t("prompt.title", { selfies: selfies(s.photos) }),
-        full ? t("prompt.full") : t("prompt.more"),
-      ],
+      // Сколько селфи принято и можно ли ещё — одной строкой: это один факт.
+      t(full ? "prompt.full" : "prompt.more", { selfies: selfies(s.photos) }),
       // Пример — часть просьбы, а не отдельная мысль: между ними пустой строки нет.
       [t("prompt.ask.title"), t("prompt.ask.body"), t("prompt.example")],
       contextLine(s.model, s.balance),
@@ -268,12 +268,14 @@ export function busy(s: BusyState): Screen {
     text: compose(
       s.notice,
       [t("busy.title"), t("busy.body")],
-      t("busy.context", {
-        model: modelName(s.model),
-        cost: sparks(s.cost),
-        balance: sparks(s.balance),
-      }),
-      t("busy.calm")
+      [
+        t("busy.context", {
+          model: modelName(s.model),
+          cost: sparks(s.cost),
+          balance: sparks(s.balance),
+        }),
+        t("busy.calm"),
+      ]
     ),
   };
 }
@@ -296,11 +298,10 @@ export function topup(s: TopupState): Screen {
       s.notice,
       [t("topup.title"), t("topup.lead", { price: sparks(MODELS[CHEAPEST_MODEL].price) })],
       [
-        t("topup.offer.title"),
-        t("topup.offer.body", { fiat: num(MAX_BONUS_FIAT), stars: num(MAX_BONUS_STARS) }),
+        t("topup.offer", { fiat: num(MAX_BONUS_FIAT), stars: num(MAX_BONUS_STARS) }),
+        balanceOf(s.balance),
+        t("topup.objection"),
       ],
-      balanceOf(s.balance),
-      t("topup.objection"),
       t("common.bridge")
     ),
     reply_markup: topupKeyboard(s.from),
@@ -342,18 +343,15 @@ export function packs(s: PacksState): Screen {
         }),
       ],
       [
-        t("packs.offer.title"),
         t(grows ? "packs.offer.grow" : "packs.offer.flat", {
           bonus: num(bonusOf(best, s.method)),
         }),
+        t(grows ? "packs.best.grow" : "packs.best.flat", {
+          price: money(priceOf(best, s.method), s.method),
+          cheap: frames(framesFor(sparksOf(best, s.method), CHEAPEST_MODEL)),
+          cheapName: modelName(CHEAPEST_MODEL),
+        }),
       ],
-      t(grows ? "packs.best.grow" : "packs.best.flat", {
-        price: money(priceOf(best, s.method), s.method),
-        cheap: frames(framesFor(sparksOf(best, s.method), CHEAPEST_MODEL)),
-        cheapName: modelName(CHEAPEST_MODEL),
-        dear: num(framesFor(sparksOf(best, s.method), DEAREST_MODEL)),
-        dearName: modelName(DEAREST_MODEL),
-      }),
       t(`packs.${s.method}.objection`),
       t("packs.bridge")
     ),
@@ -367,9 +365,9 @@ export function help(s: Notice = {}): Screen {
   return {
     text: compose(
       s.notice,
-      [t("help.title"), t("help.lead")],
-      [t("help.how.title"), t("help.how.body")],
-      [t("help.wait.title"), t("help.wait.body")],
+      // Весь путь — одним блоком из трёх строк. Два блока с заголовками
+      // «Как сделать кадр» и «Сколько ждать» пересказывали ровно его.
+      [t("help.title"), t("help.lead"), t("help.calm")],
       // Строка про поддержку появляется только вместе с адресом: обещать канал
       // связи, которого нет, хуже, чем промолчать.
       t("help.faq.text", { support: SUPPORT_URL ? t("help.faq.support", { url: SUPPORT_URL }) : "" }),

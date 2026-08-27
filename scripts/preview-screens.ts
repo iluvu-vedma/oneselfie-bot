@@ -494,11 +494,17 @@ for (const item of ALL) {
 
 // ── Сквозные проверки ────────────────────────────────────────────────────────
 
-const modelsText = screens.models({ balance: 0 }).text;
+// «Видно до нажатия» — это про весь экран, а не про один его текст: цена модели
+// стоит на кнопке, и повторять её строкой выше значило бы писать одно дважды.
+const modelsScreen = screens.models({ balance: 0 });
+const modelsSeen = [
+  modelsScreen.text,
+  ...rows(modelsScreen.reply_markup).flat().map((b) => b.text),
+].join("\n");
 for (const id of MODEL_ORDER) {
-  check(modelsText.includes(modelName(id)), `models: модель ${id} не попала на экран`);
+  check(modelsSeen.includes(modelName(id)), `models: модель ${id} не попала на экран`);
   check(
-    modelsText.includes(sparks(MODELS[id].price)),
+    modelsSeen.includes(sparks(MODELS[id].price)),
     `models: цена ${id} не видна до нажатия`
   );
 }

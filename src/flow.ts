@@ -152,24 +152,30 @@ function callbackUrl(): string {
  * Списываем ДО обращения к kie, иначе два быстрых сообщения дают два кадра за
  * одно списание. Экран перерисовывается до `createTask`, а не после: сетевой
  * запрос занимает секунду, и всю эту секунду человек не должен смотреть в тишину.
+ *
+ * Первый экран на каждой ветке отправляется через `move`, а не `draw`: описание
+ * кадра пришло сообщением и уже легло в ленту, поэтому старый экран остался выше
+ * него и его не видно. Переезд делается ровно один раз и сразу в нужном
+ * состоянии — промежуточная копия экрана промпта, которая через секунду
+ * превращалась в «Рисую кадр», читалась как дубль и мигала.
  */
 export async function startGeneration(chatId: number, userPrompt: string): Promise<void> {
   const user = await store.getUser(chatId);
   const model = user.model;
   if (model === null) {
-    return draw(chatId, { id: "models" }, { notice: t("notice.needModel") });
+    return move(chatId, { id: "models" }, { notice: t("notice.needModel") });
   }
 
   // Источник выбран человеком: в режиме «словами» фото игнорируются, даже если
   // они лежат в состоянии с прошлого кадра.
   const photos = user.source === "photo" ? await store.getPhotos(chatId) : [];
   if (user.source === "photo" && photos.length === 0) {
-    return draw(chatId, { id: "upload" }, { notice: t("notice.needPhoto") });
+    return move(chatId, { id: "upload" }, { notice: t("notice.needPhoto") });
   }
 
   const lock = await store.acquireGenLock(chatId);
   // Замка нет — кадр уже готовится. Экран сам это покажет: стадия читается из замка.
-  if (!lock) return draw(chatId, { id: "busy" });
+  if (!lock) return move(chatId, { id: "busy" });
 
   const cost = MODELS[model].price;
   const balanceAfter = await store.trySpend(chatId, cost);
@@ -177,7 +183,7 @@ export async function startGeneration(chatId: number, userPrompt: string): Promi
     await store.releaseGenLock(chatId, lock);
     await store.setTopupFrom(chatId, model);
     await countTopup(chatId);
-    return draw(
+    return move(
       chatId,
       { id: "topup", from: model },
       { notice: t("notice.needSparks", { amount: sparks(cost) }) }
@@ -188,7 +194,7 @@ export async function startGeneration(chatId: number, userPrompt: string): Promi
   // Модель и цена дописываются в текущее событие: всё, что залогируется ниже,
   // — поход в kie, отказ, возврат — придёт в ленту уже с ними.
   log.note({ model, cost, photos: photos.length });
-  await draw(chatId, { id: "busy" });
+  await move(chatId, { id: "busy" });
   await bot.api.sendChatAction(chatId, "upload_photo").catch(() => {});
 
   let taskId: string;
@@ -212,6 +218,8 @@ export async function startGeneration(chatId: number, userPrompt: string): Promi
       back: true,
     });
     await notifyOwner(`createTask (${model}) упал у ${chatId}: ${String(e)}`);
+    // Здесь уже `draw`: экран «Рисую кадр» переехал вниз строкой выше, и его
+    // достаточно перерисовать на месте.
     return draw(
       chatId,
       { id: "model", model },
