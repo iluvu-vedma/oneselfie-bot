@@ -552,9 +552,9 @@ bot.on("message:text", async (ctx) => {
   // Промпт написан на экране модели, до выбора способа: раз фото нет — значит словами.
   if ((await currentRef(chatId)).id === "model") await setSource(chatId, "text");
 
-  // Сообщение человека уже лежит в ленте — экран переезжает под него, а рисовать
-  // дальше будет startGeneration.
-  await move(chatId, await currentRef(chatId));
+  // Экран тут не перерисовывается: сообщение человека уже легло в ленту, и
+  // следующий экран, который он должен увидеть, — «Рисую кадр». Его и пришлёт
+  // startGeneration, сразу под сообщением и сразу в нужном состоянии.
   await startGeneration(chatId, text);
 });
 

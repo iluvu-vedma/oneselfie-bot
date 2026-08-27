@@ -246,7 +246,11 @@ async function main(): Promise<void> {
 
   await F.startGeneration(CHAT, "на крыше в вечернем городе");
   show("Прислали промпт");
-  check(chat.length === 1, "экран «идёт работа» перерисован, а не отправлен");
+  check(chat.length === 1, "экран переехал под сообщение человека, а не удвоился");
+  check(
+    chat[0].text.startsWith(t("busy.title")),
+    "и переехал сразу в «идёт работа»: копии экрана промпта в ленте не мелькает"
+  );
   check(chat[0].buttons.length === 0, "во время генерации нажимать нечего");
   check((await S.getBalance(CHAT)) === 550 - PRICE, `списано ровно ${PRICE} ✨`);
   check(kieCalls[0].model === "nbpro", "в kie ушла выбранная модель");

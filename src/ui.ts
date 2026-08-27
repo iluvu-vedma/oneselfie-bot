@@ -93,6 +93,18 @@ export function balanceOf(balance: number): string {
   return t("common.balance", { balance: sparks(balance) });
 }
 
+/**
+ * «Кадр 20 ✨ · Баланс: 0 ✨» — там, где имя модели уже стоит в заголовке экрана.
+ * Повторять его строкой ниже значит тратить строку на то, что человек только что
+ * прочитал.
+ */
+export function priceLine(model: ModelId, balance: number): string {
+  return t("common.price", {
+    price: sparks(MODELS[model].price),
+    balance: sparks(balance),
+  });
+}
+
 /** «Nano Banana 2 · кадр 12 ✨ · Баланс: 300 ✨» — модель, цена и баланс одной строкой. */
 export function contextLine(model: ModelId, balance: number): string {
   return t("common.context", {
