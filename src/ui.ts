@@ -16,6 +16,7 @@ import {
   Pack,
   PayMethod,
   RECOMMENDED_METHOD,
+  SUPPORT_URL,
   TAKE_REASON,
   bonusOf,
   isModelId,
@@ -311,6 +312,10 @@ export function packButton(pack: Pack, method: PayMethod): string {
 /** Из справки выход только вперёд, в целевое действие: экран с одним «Назад» — тупик. */
 export function helpKeyboard(): InlineKeyboard {
   const kb = new InlineKeyboard().text(t("button.create"), CB.models).primary();
+  // Живой человек — последней строкой перед «Назад», как любая внешняя ссылка.
+  // Пустой SUPPORT_URL — кнопки нет вовсе: обещать канал связи, которого
+  // не существует, хуже, чем промолчать.
+  urlRow(kb, t("button.support"), SUPPORT_URL);
   return back(kb, CB.home);
 }
 

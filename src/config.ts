@@ -361,7 +361,7 @@ function link(value: string | undefined): string {
 export const CHANNEL_URL = link(process.env.CHANNEL_URL);
 /** Канал с промптами. Кнопка там, где человек завис над пустым полем ввода. */
 export const PROMPTS_CHANNEL_URL = link(process.env.PROMPTS_CHANNEL_URL);
-/** Куда писать, если сломалось. Строка в справке появляется только вместе с адресом. */
+/** Куда писать, если сломалось. Кнопка и строка в справке — только вместе с адресом. */
 export const SUPPORT_URL = link(process.env.SUPPORT_URL);
 
 // ── Промпт для режима «моё фото» ─────────────────────────────────────────────
