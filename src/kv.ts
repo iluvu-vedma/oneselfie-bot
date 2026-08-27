@@ -1,6 +1,7 @@
 import { Redis } from "@upstash/redis";
 import { DAILY_TTL_SEC, REPORT_TZ } from "./config";
 import { k } from "./keys";
+import * as log from "./log";
 
 /**
  * Key-value без схем, ORM и миграций.
@@ -68,6 +69,15 @@ export async function bump(event: string, by = 1): Promise<void> {
       })(),
     ]);
   } catch (e) {
-    console.error("stat failed", event, e);
+    log.error("kv.bump", e, { event });
   }
+}
+
+/**
+ * Сумма и количество одним событием: из них считается среднее время.
+ * Гистограмму на счётчиках не собрать, а среднее время кадра отвечает на
+ * единственный вопрос, который тут вообще задают, — «стало медленнее или нет».
+ */
+export async function measure(event: string, ms: number): Promise<void> {
+  await Promise.all([bump(`${event}_ms`, ms), bump(`${event}_n`)]);
 }

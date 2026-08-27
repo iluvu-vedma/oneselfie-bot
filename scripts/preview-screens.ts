@@ -21,10 +21,10 @@ import {
 } from "../src/config";
 import { LOCALE, missingKeys, t } from "../src/i18n";
 import * as admin from "../src/admin-screens";
-import type { Fail, Op } from "../src/ledger";
+import type { ErrorNote, Fail, Op } from "../src/ledger";
 import * as screens from "../src/screens";
 import type { Screen } from "../src/screens";
-import type { Dash } from "../src/stats";
+import type { Dash, Health } from "../src/stats";
 import type { Person } from "../src/store";
 import { ACB, CB, modelName, sparks } from "../src/ui";
 
@@ -231,6 +231,30 @@ const FAILS: Fail[] = [
   { at: NOW - 5 * HOUR, chatId: ANON.chatId, model: null, cost: 10, reason: "не запустился", back: false },
 ];
 
+const HEALTH: Health = {
+  queue: { size: 3, oldestMs: 7 * 60 * 1000 },
+  speed: { frameMs: 42_000, kieMs: 1_200 },
+  errors: { kie: 12, kieToday: 2, slow: 1, busy: 0 },
+  today: { gen: 34, done: 31, failed: 3 },
+};
+
+const ERRORS: ErrorNote[] = [
+  {
+    at: NOW - 20 * 60000,
+    rid: "a3f9d1",
+    where: "kie.failed",
+    detail: "kie /api/v1/jobs/createTask: 422 model name not supported",
+    chatId: SLAVA.chatId,
+  },
+  {
+    at: NOW - 3 * HOUR,
+    rid: "7c1e04",
+    where: "telegram.error",
+    detail: "GrammyError: Bad Request: message to edit not found",
+    chatId: ANON.chatId,
+  },
+];
+
 const ADMIN_ITEMS: Item[] = [
   {
     id: "admin",
@@ -243,6 +267,25 @@ const ADMIN_ITEMS: Item[] = [
     screen: admin.dashboard({
       dash: { ...DASH, frames: { done: 288, failed: 0 } },
       users: 128,
+      fails: 0,
+    }),
+  },
+  {
+    id: "admin.health",
+    title: "Здоровье: очередь растёт, kie сыпется",
+    screen: admin.health({ health: HEALTH, errors: ERRORS, fails: 12 }),
+  },
+  {
+    id: "admin.health.calm",
+    title: "Здоровье: всё тихо",
+    screen: admin.health({
+      health: {
+        queue: { size: 0, oldestMs: 0 },
+        speed: { frameMs: 0, kieMs: 0 },
+        errors: { kie: 0, kieToday: 0, slow: 0, busy: 0 },
+        today: { gen: 0, done: 0, failed: 0 },
+      },
+      errors: [],
       fails: 0,
     }),
   },
@@ -282,6 +325,7 @@ const ADMIN_ITEMS: Item[] = [
       ops: OPS,
       opsTotal: LEDGER_KEEP,
       fails: [FAILS[0]],
+      photos: 2,
       owed: 20,
       owedReturned: true,
       backTo: ACB.fails,
@@ -295,6 +339,7 @@ const ADMIN_ITEMS: Item[] = [
       ops: [],
       opsTotal: 0,
       fails: [FAILS[1]],
+      photos: 0,
       owed: 10,
       owedReturned: false,
       backTo: ACB.users,
@@ -335,6 +380,7 @@ const ROUTES: (string | RegExp)[] = [
   CB.genPhoto,
   CB.genText,
   CB.genReset,
+  CB.genPhotos,
   CB.MODEL_RE,
   CB.TOPUP_RE,
   CB.PAY_RE,
@@ -343,7 +389,9 @@ const ROUTES: (string | RegExp)[] = [
   ACB.fails,
   ACB.users,
   ACB.find,
+  ACB.health,
   ACB.CARD_RE,
+  ACB.PHOTOS_RE,
   ACB.REASON_RE,
   ACB.AMOUNT_RE,
   ACB.CUSTOM_RE,

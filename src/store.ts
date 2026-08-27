@@ -1,10 +1,12 @@
 import { redis, k, num, bump } from "./kv";
 import {
+  CHAT_LOCK_TTL_SEC,
   GEN_LOCK_TTL_SEC,
   HUB_TTL_SEC,
   MAX_PHOTOS,
   PHOTO_TTL_SEC,
   ModelId,
+  SWEEP_BATCH,
   TASK_TTL_SEC,
   isModelId,
 } from "./config";
@@ -187,6 +189,29 @@ export async function isGenerating(chatId: number): Promise<boolean> {
   return (await redis.exists(k.genLock(chatId))) === 1;
 }
 
+// ── Очередь чата ─────────────────────────────────────────────────────────────
+/**
+ * Апдейты одного человека обрабатываются по очереди. Плагин `sequentialize`
+ * из grammY тут бесполезен: он держит очередь в памяти процесса, а на Vercel
+ * альбом из четырёх селфи приезжает в четыре разных процесса одновременно.
+ * Общая очередь может жить только в KV.
+ *
+ * Токен тот же приём, что у замка генерации: свой замок снимается своим ключом,
+ * чужой не трогается никогда.
+ */
+export async function acquireChatLock(chatId: number): Promise<string | null> {
+  const token = `c${Math.random().toString(36).slice(2)}${Date.now().toString(36)}`;
+  const res = await redis.set(k.chatLock(chatId), token, {
+    nx: true,
+    ex: CHAT_LOCK_TTL_SEC,
+  });
+  return res === "OK" ? token : null;
+}
+
+export async function releaseChatLock(chatId: number, token: string): Promise<void> {
+  await redis.eval(UNLOCK_LUA, [k.chatLock(chatId)], [token]);
+}
+
 // ── Экран ────────────────────────────────────────────────────────────────────
 
 /** message_id текущего экрана или null, если экрана ещё нет. */
@@ -203,11 +228,13 @@ export async function setHubId(chatId: number, messageId: number): Promise<void>
  * Читает и сразу забывает id: экран сейчас переедет вниз, и старый message_id
  * не должен пережить неудачное удаление — иначе бот будет править сообщение,
  * которого пользователь уже не видит.
+ *
+ * GETDEL, а не GET и следом DEL: между двумя командами помещается второй
+ * процесс, и тогда один и тот же экран удаляют дважды, а новых присылают два.
  */
 export async function takeHubId(chatId: number): Promise<number | null> {
-  const id = await getHubId(chatId);
-  if (id !== null) await redis.del(k.hub(chatId));
-  return id;
+  const id = num(await redis.getdel(k.hub(chatId)));
+  return id > 0 ? id : null;
 }
 
 // ── Селфи ────────────────────────────────────────────────────────────────────
@@ -318,9 +345,29 @@ export async function getChatTask(chatId: number): Promise<string | null> {
 }
 
 /** Задачи старше cutoff, всё ещё висящие без результата. */
-export async function pendingOlderThan(cutoffMs: number, limit = 25): Promise<string[]> {
+export async function pendingOlderThan(
+  cutoffMs: number,
+  limit = SWEEP_BATCH
+): Promise<string[]> {
   const ids = await redis.zrange<string[]>(k.pending, 0, cutoffMs, { byScore: true });
   return (ids ?? []).slice(0, limit).map(String);
+}
+
+/** Сколько задач висит без результата прямо сейчас. Первое число экрана здоровья. */
+export async function pendingSize(): Promise<number> {
+  return num(await redis.zcard(k.pending));
+}
+
+/**
+ * Когда была заведена самая старая висящая задача, мс. 0 — очередь пуста.
+ * Возраст старейшей задачи и есть ответ на вопрос «добор вообще работает?»:
+ * при живом доборе он не превышает таймаута, при мёртвом растёт часами.
+ */
+export async function oldestPendingAt(): Promise<number> {
+  const rows = await redis.zrange<(string | number)[]>(k.pending, 0, 0, {
+    withScores: true,
+  });
+  return num(rows?.[1]);
 }
 
 // ── Платежи ──────────────────────────────────────────────────────────────────

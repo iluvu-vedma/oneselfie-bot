@@ -1,4 +1,5 @@
 import { ADMIN_IDS, OWNER_CHAT_ID } from "./config";
+import * as log from "./log";
 import { bot } from "./telegram";
 
 /**
@@ -6,12 +7,12 @@ import { bot } from "./telegram";
  * в панель надо зайти, а сообщение приходит само.
  */
 export async function notifyOwner(text: string): Promise<void> {
-  console.log("[owner]", text);
+  log.info("owner.notify", { text });
   if (!OWNER_CHAT_ID) return;
   try {
     await bot.api.sendMessage(OWNER_CHAT_ID, text, { disable_notification: true });
   } catch (e) {
-    console.error("notifyOwner failed", e);
+    log.error("owner.notify", e);
   }
 }
 

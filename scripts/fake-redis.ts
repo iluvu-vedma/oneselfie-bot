@@ -29,6 +29,17 @@ export class FakeRedis {
     const e = this.live(key);
     return e === undefined ? null : e.v;
   }
+  /**
+   * Читает и стирает одной командой. На этом стоит переезд экрана вниз.
+   * Между чтением и стиранием нет `await` — иначе заглушка не воспроизводила
+   * бы ровно то свойство, ради которого GETDEL и взят вместо GET плюс DEL.
+   */
+  async getdel(key: string) {
+    const e = this.live(key);
+    if (e === undefined) return null;
+    this.m.delete(key);
+    return e.v;
+  }
   async set(key: string, val: any, opts?: { nx?: boolean; ex?: number }) {
     if (opts?.nx && this.live(key) !== undefined) return null;
     this.m.set(key, { v: val, exp: opts?.ex ? Date.now() + opts.ex * 1000 : undefined });
@@ -160,7 +171,7 @@ export class FakeRedis {
     key: string,
     min: number,
     max: number,
-    o?: { byScore?: boolean; rev?: boolean }
+    o?: { byScore?: boolean; rev?: boolean; withScores?: boolean }
   ) {
     const z: Map<string, number> = this.live(key)?.v ?? new Map();
     let items = [...z.entries()].sort((a, b) => a[1] - b[1]);
@@ -168,6 +179,9 @@ export class FakeRedis {
     items = o?.byScore
       ? items.filter(([, s]) => s >= min && s <= max)
       : items.slice(min, max === -1 ? undefined : max + 1);
+    // Со счётами Redis отдаёт плоский список: член, счёт, член, счёт.
+    // Возраст старейшей задачи в очереди читается именно так.
+    if (o?.withScores) return items.flatMap(([mem, score]) => [mem, score]);
     return items.map(([mem]) => mem);
   }
   async zcard(key: string) {

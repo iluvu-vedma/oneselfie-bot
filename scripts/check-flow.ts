@@ -38,6 +38,7 @@ stub("kv", {
   k,
   num: (v: unknown, f = 0) => (typeof v === "number" ? v : Number(v) || f),
   bump: async () => {},
+  measure: async () => {},
 });
 
 // ── Лента чата ───────────────────────────────────────────────────────────────
@@ -95,7 +96,27 @@ const api = {
   async sendChatAction() {
     return true;
   },
+  /** Альбом — один объект в ленте, сколько бы картинок в нём ни было. */
+  async sendMediaGroup(_chat: number, media: any[]) {
+    if (albumBroken) {
+      throw telegramError(
+        "Bad Request: failed to get HTTP URL content",
+        "sendMediaGroup"
+      );
+    }
+    const m: Msg = {
+      id: nextId++,
+      kind: "photo",
+      text: media[0]?.caption ?? "",
+      buttons: [],
+    };
+    chat.push(m);
+    return [{ message_id: m.id }];
+  },
 };
+
+/** Ссылки на селфи протухли: kie держит файлы около суток. */
+let albumBroken = false;
 
 stub("telegram", { bot: { api } });
 stub("owner", { notifyOwner: async () => {}, isOwner: () => false });
@@ -124,6 +145,7 @@ stub("kie", {
 const S = require("../src/store") as typeof import("../src/store");
 const F = require("../src/flow") as typeof import("../src/flow");
 const D = require("../src/deliver") as typeof import("../src/deliver");
+const H = require("../src/hub") as typeof import("../src/hub");
 const { MODELS, SWEEP_AFTER_SEC, TIMEOUT_SEC } =
   require("../src/config") as typeof import("../src/config");
 const { t } = require("../src/i18n") as typeof import("../src/i18n");
@@ -323,6 +345,31 @@ async function main(): Promise<void> {
   show("Экран удалили руками");
   check(chat.length === 1, "экран восстановился новым сообщением");
   check(screens().length === 1, "и он рабочий");
+
+  // ── Просмотр селфи ────────────────────────────────────────────────────
+  // Экран текстовый, и медийным его не сделать: селфи могут приехать только
+  // отдельным объектом в ленте, а экран обязан переехать под него.
+  chat.length = 0;
+  await F.move(CHAT, { id: "prompt" });
+  const refs = await S.getPhotos(CHAT);
+  check(refs.length === 4, "селфи в состоянии на месте");
+
+  const shown = await H.album(CHAT, refs, "селфи");
+  await F.move(CHAT, { id: "prompt" });
+  show("Показали селфи");
+  check(shown === "ok", "альбом ушёл в ленту");
+  check(chat.length === 2, "альбом и экран под ним — два объекта, а не пять");
+  check(chat[0].kind === "photo", "альбом выше экрана");
+  check(screens().length === 1, "рабочий экран по-прежнему один");
+
+  // Ссылки в kie живут около суток. Протухли — кадр по ним всё равно бы не
+  // вышел, и человека надо просить прислать селфи заново, а не списывать искры.
+  albumBroken = true;
+  check(
+    (await H.album(CHAT, refs, "селфи")) === "gone",
+    "отказ Telegram забрать ссылку читается как «файла больше нет»"
+  );
+  albumBroken = false;
 
   console.log(failed === 0 ? "\nВсё сошлось." : `\nПровалено проверок: ${failed}`);
   process.exit(failed === 0 ? 0 : 1);

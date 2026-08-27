@@ -18,12 +18,21 @@ require.cache[kvPath] = {
     k,
     num: (v: unknown, f = 0) => (typeof v === "number" ? v : Number(v) || f),
     bump: async () => {},
+    measure: async () => {},
   },
 } as any;
 
 const S = require("../src/store") as typeof import("../src/store");
-const { MODELS, PHOTO_TTL_SEC } =
-  require("../src/config") as typeof import("../src/config");
+const {
+  CHAT_LOCK_TTL_SEC,
+  CHAT_LOCK_WAIT_MS,
+  GEN_LOCK_TTL_SEC,
+  MODELS,
+  PHOTO_TTL_SEC,
+  TASK_TTL_SEC,
+  TIMEOUT_SEC,
+  WEBHOOK_TIMEOUT_MS,
+} = require("../src/config") as typeof import("../src/config");
 
 let failed = 0;
 function check(ok: boolean, label: string) {
@@ -181,6 +190,67 @@ async function main() {
     "провал во втором формате тоже читается как провал"
   );
   check(K.taskIdOf({ code: 200 }) === "", "чужое тело не превращается в задачу");
+
+  // ── Очередь на чат ───────────────────────────────────────────────
+  // Апдейты одного человека приезжают в разные процессы одновременно:
+  // альбом из четырёх селфи — это четыре запуска функции. Замок живёт
+  // в KV именно поэтому — внутрипроцессная очередь тут не работает вовсе.
+  const line = await Promise.all([S.acquireChatLock(chat), S.acquireChatLock(chat)]);
+  const mine = line.find(Boolean)!;
+  check(line.filter(Boolean).length === 1, `в чат пущен один (${line})`);
+
+  await S.releaseChatLock(chat, "c-чужой-токен");
+  check((await S.acquireChatLock(chat)) === null, "чужой токен очередь не двинул");
+  await S.releaseChatLock(chat, mine);
+  const next = await S.acquireChatLock(chat);
+  check(next !== null, "свой токен очередь отпустил");
+  await S.releaseChatLock(chat, next!);
+
+  // Замок генерации и замок очереди — разные ключи: кадр рисуется минуту,
+  // а очередь держится секунды, и один ключ на двоих запер бы человека надолго.
+  const busy = (await S.acquireGenLock(chat))!;
+  const during = await S.acquireChatLock(chat);
+  check(during !== null, "очередь берётся и во время генерации");
+  await S.releaseChatLock(chat, during!);
+  await S.releaseGenLock(chat, busy);
+
+  // Переезд экрана вниз — одно действие, а не два. Двое одновременно
+  // читающих один и тот же id удаляют одно и то же сообщение дважды
+  // и присылают два новых экрана.
+  await S.setHubId(chat, 909);
+  const takes = await Promise.all([S.takeHubId(chat), S.takeHubId(chat)]);
+  check(
+    takes.filter((id) => id !== null).length === 1,
+    `id экрана достался ровно одному (${takes})`
+  );
+
+  // Возраст старейшей задачи — единственный признак того, что добор жив:
+  // при мёртвом он растёт часами, а очередь набивается списанными искрами.
+  check((await S.pendingSize()) === 1, "в очереди осталась одна задача");
+  const oldest = await S.oldestPendingAt();
+  check(oldest > 0 && oldest <= Date.now(), `возраст старейшей читается (${oldest})`);
+  await S.forgetPending("t2");
+  check((await S.oldestPendingAt()) === 0, "пустая очередь не даёт возраста");
+
+  // ── Сроки ─────────────────────────────────────────────────────────
+  // Сроки связаны друг с другом, и разъехаться они могут молча: правка одного
+  // числа в config ничего не сломает ни в типах, ни на экранах — только в деньгах.
+  check(
+    TASK_TTL_SEC >= 2 * 24 * 60 * 60,
+    `запись задачи переживает два прихода суточного крона (${TASK_TTL_SEC} с)`
+  );
+  check(
+    GEN_LOCK_TTL_SEC > TIMEOUT_SEC,
+    "замок генерации живёт дольше таймаута: возврат успевает снять его сам"
+  );
+  check(
+    CHAT_LOCK_TTL_SEC * 1000 >= WEBHOOK_TIMEOUT_MS,
+    "замок чата переживает самый долгий обработчик"
+  );
+  check(
+    CHAT_LOCK_WAIT_MS < WEBHOOK_TIMEOUT_MS,
+    "ожидание очереди короче срока вебхука: ждать дольше собственной смерти незачем"
+  );
 
   console.log(failed === 0 ? "\nВсё сошлось." : `\nПровалено проверок: ${failed}`);
   process.exit(failed === 0 ? 0 : 1);

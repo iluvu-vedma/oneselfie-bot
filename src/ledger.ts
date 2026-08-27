@@ -1,4 +1,5 @@
 import {
+  ERRORS_KEEP,
   FAILS_KEEP,
   GRANTS_KEEP,
   GrantReason,
@@ -9,6 +10,7 @@ import {
   isModelId,
 } from "./config";
 import { k, num, redis } from "./kv";
+import * as log from "./log";
 
 /**
  * Журналы. Баланс — счётчик, и по нему не видно, откуда взялось число:
@@ -89,7 +91,7 @@ export async function record(
     const op: Op = { at: Date.now(), delta, kind, ref, ...(by === undefined ? {} : { by }) };
     await push(k.ledger(chatId), op, LEDGER_KEEP);
   } catch (e) {
-    console.error("ledger record failed", chatId, kind, e);
+    log.error("ledger.record", e, { chatId, kind });
   }
 }
 
@@ -139,7 +141,7 @@ export async function logFail(fail: Fail): Promise<void> {
     await push(k.fails, fail, FAILS_KEEP);
     await push(k.userFails(fail.chatId), fail, USER_FAILS_KEEP);
   } catch (e) {
-    console.error("fail log failed", fail.chatId, e);
+    log.error("ledger.logFail", e, { chatId: fail.chatId });
   }
 }
 
@@ -185,7 +187,7 @@ export async function logGrant(grant: Grant): Promise<void> {
   try {
     await push(k.grants, grant, GRANTS_KEEP);
   } catch (e) {
-    console.error("grant log failed", grant.chatId, e);
+    log.error("ledger.logGrant", e, { chatId: grant.chatId });
   }
 }
 
@@ -211,3 +213,46 @@ export async function recentGrants(limit: number): Promise<Grant[]> {
 export async function failsCount(): Promise<number> {
   return num(await redis.llen(k.fails));
 }
+
+// ── Кольцо ошибок ────────────────────────────────────────────────────────────
+/**
+ * Сбой генерации и ошибка — разные вещи, и лежат они отдельно. Сбой это
+ * «кадр не вышел, кому-то должны искры», и он про деньги. Ошибка это «код
+ * упал», и она про то, что чинить. Смешаешь одно с другим — лог сбоев,
+ * по которому возвращают деньги, зарастёт таймаутами сети.
+ *
+ * Логи Vercel на бесплатном тарифе живут час, а вопрос «что вчера ломалось»
+ * задают на следующий день. Поэтому последние ошибки лежат своим кольцом.
+ */
+export type ErrorNote = log.ErrorNote;
+
+export async function recentErrors(limit: number): Promise<ErrorNote[]> {
+  const rows = await read(k.errors, limit);
+  const notes: ErrorNote[] = [];
+  for (const row of rows) {
+    const o = decode(row);
+    if (!o || o.where === undefined) continue;
+    notes.push({
+      at: num(o.at),
+      rid: o.rid ? String(o.rid) : "-",
+      where: String(o.where),
+      detail: o.detail === undefined || o.detail === null ? "" : String(o.detail),
+      ...(o.chatId === undefined ? {} : { chatId: num(o.chatId) }),
+    });
+  }
+  return notes;
+}
+
+export async function errorsCount(): Promise<number> {
+  return num(await redis.llen(k.errors));
+}
+
+/**
+ * Приёмник для `log.error`. Ставится здесь, а не в `log.ts`: тот намеренно ни
+ * от чего не зависит, иначе импорты замкнутся в кольцо — его тянет и `kv.ts`.
+ *
+ * Запись не ждут: ошибка уже случилась, и падать на её сохранении смешно.
+ */
+log.setSink((note) => {
+  void push(k.errors, note, ERRORS_KEEP).catch(() => {});
+});

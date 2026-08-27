@@ -14,6 +14,7 @@ import {
 } from "./config";
 import { pct } from "./i18n";
 import { dayKey, k, num, redis } from "./kv";
+import { oldestPendingAt, pendingSize } from "./store";
 import { modelName } from "./ui";
 
 /** Счётчики строятся из тех же таблиц, что и экраны: список событий не разъедется. */
@@ -33,6 +34,19 @@ const EVENTS: string[] = [
   "sparks_granted",
   "sparks_taken",
   "stars_earned",
+  "photos_shown",
+  "admin_photos_shown",
+  // Время живёт парой «сумма и количество»: гистограмму на счётчиках не собрать,
+  // а среднее отвечает на единственный вопрос, который тут задают.
+  "gen_ms",
+  "gen_n",
+  "kie_ms",
+  "kie_n",
+  "kie_err",
+  /** Апдейт не уложился в отведённое вебхуку время. Признак того, что бот тонет. */
+  "update_slow",
+  /** Чат не освободился за отведённое ожидание: очередь длиннее, чем мы готовы ждать. */
+  "lock_busy",
   ...MODEL_ORDER.map((id) => `gen_${id}`),
   ...PAY_METHOD_ORDER.flatMap((m) => PACKS.map((p) => `paid_${m}_${p.tier}`)),
 ];
@@ -131,6 +145,74 @@ export async function buildDash(): Promise<Dash> {
       gen: MODEL_ORDER.reduce((sum, id) => sum + now[`gen_${id}`], 0),
       paid: paidEvents(now),
       stars: now.stars_earned,
+    },
+  };
+}
+
+// ── Здоровье ─────────────────────────────────────────────────────────────────
+
+/**
+ * Числа, которые отвечают на один вопрос: работает бот прямо сейчас или тонет.
+ *
+ * Дашборд смотрит назад — сколько людей, сколько денег. Здоровье смотрит на
+ * сейчас: не растёт ли очередь недобранных кадров, не стало ли медленнее, не
+ * посыпался ли kie. Разносить это по разным экранам приходится потому, что
+ * читают их в разных состояниях: первый — с утра за кофе, второй — когда
+ * пришла жалоба.
+ */
+export interface Health {
+  queue: {
+    /** Задач без результата прямо сейчас. */
+    size: number;
+    /** Возраст самой старой из них, мс. 0 — очередь пуста. */
+    oldestMs: number;
+  };
+  speed: {
+    /** Среднее время кадра от списания до выдачи, мс. 0 — кадров ещё не было. */
+    frameMs: number;
+    /** Среднее время ответа kie на любой запрос, мс. */
+    kieMs: number;
+  };
+  errors: {
+    /** Отказов kie за всё время и сегодня. */
+    kie: number;
+    kieToday: number;
+    /** Апдейтов, не уложившихся в срок вебхука, и чатов, не дождавшихся очереди. */
+    slow: number;
+    busy: number;
+  };
+  today: { gen: number; done: number; failed: number };
+}
+
+/** Среднее без деления на ноль: кадров ещё не было — значит, и среднего нет. */
+function mean(sum: number, count: number): number {
+  return count > 0 ? Math.round(sum / count) : 0;
+}
+
+export async function buildHealth(): Promise<Health> {
+  const [all, now, size, oldestAt] = await Promise.all([
+    totals(),
+    daily(),
+    pendingSize(),
+    oldestPendingAt(),
+  ]);
+
+  return {
+    queue: { size, oldestMs: oldestAt > 0 ? Date.now() - oldestAt : 0 },
+    speed: {
+      frameMs: mean(all.gen_ms, all.gen_n),
+      kieMs: mean(all.kie_ms, all.kie_n),
+    },
+    errors: {
+      kie: all.kie_err,
+      kieToday: now.kie_err,
+      slow: all.update_slow,
+      busy: all.lock_busy,
+    },
+    today: {
+      gen: MODEL_ORDER.reduce((sum, id) => sum + now[`gen_${id}`], 0),
+      done: now.frame_delivered,
+      failed: now.gen_failed,
     },
   };
 }

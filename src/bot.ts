@@ -8,6 +8,7 @@ import {
   ModelId,
   PAY_METHODS,
   PayMethod,
+  WEBHOOK_TIMEOUT_MS,
   findPack,
   priceOf,
   sparksOf,
@@ -23,13 +24,15 @@ import {
 } from "./flow";
 import { install as installAdmin } from "./admin";
 import { catchUp } from "./deliver";
-import { isNotModified } from "./hub";
+import { album, isNotModified } from "./hub";
 import { t } from "./i18n";
 import { bump } from "./kv";
 import { uploadImage } from "./kie";
 import { record } from "./ledger";
+import * as log from "./log";
 import { isOwner, notifyOwner } from "./owner";
 import { check, normalize } from "./prompt";
+import { withChatLock } from "./queue";
 import { buildStats } from "./stats";
 import { bot } from "./telegram";
 import {
@@ -39,6 +42,7 @@ import {
   credit,
   ensureUser,
   getModel,
+  getPhotos,
   isGenerating,
   markPaid,
   markPhotosReady,
@@ -57,6 +61,7 @@ import {
   money,
   parsePayload,
   payloadOf,
+  selfies,
   sparks,
   sparksNamed,
 } from "./ui";
@@ -72,28 +77,125 @@ export { bot };
  */
 
 /**
- * Добор кадра по действию человека. Коллбэк kie мог не дойти, а крон на
- * бесплатном Vercel ходит раз в сутки — столько ждать кадр с уже списанными
- * искрами нельзя. Любое действие в боте становится поводом спросить у kie,
- * готов ли результат.
+ * Один апдейт — одна запись в логе и одно место в очереди чата.
  *
- * Стоит ПОСЛЕ `next()` осознанно: обработчик успевает нарисовать свой экран,
- * и только потом под ним появляется кадр, а экран переезжает вниз сам.
+ * Очередь: апдейты одного человека приезжают параллельно. Альбом из четырёх
+ * селфи — это четыре одновременных запуска функции, и без очереди каждый
+ * рисует свой экран, а человек получает четыре копии вместо одной. Плагин
+ * `sequentialize` из grammY тут не помогает вовсе: он держит очередь в памяти
+ * процесса, а процессов столько же, сколько апдейтов. Общая очередь живёт в KV.
+ *
+ * Лог: у всего, что залогируется внутри, будет общий `rid`. По нему из ленты
+ * Vercel выдёргивается вся история одного нажатия целиком — вместе с походом
+ * в kie и отправкой в Telegram.
+ *
+ * Добор стоит ПОСЛЕ `next()` осознанно: обработчик успевает нарисовать свой
+ * экран, и только потом под ним появляется кадр, а экран переезжает вниз сам.
  * Наоборот — обработчик станет править сообщение, которое выдача уже удалила.
+ */
+bot.use(async (ctx, next) => {
+  const chatId = ctx.chat?.id;
+
+  await log.scope({ chatId, kind: kindOf(ctx) }, async () => {
+    const ms = log.timer();
+    try {
+      if (chatId === undefined) return await next();
+      await withChatLock(chatId, async () => {
+        await next();
+        await catchUpQuietly(chatId);
+      });
+    } catch (e) {
+      // Ошибка разбирается здесь, а не в `bot.catch`: тот срабатывает уже за
+      // пределами `log.scope`, и запись потеряла бы `rid` — то единственное,
+      // по чему потом собирается вся история события.
+      report(e);
+      await apologise(ctx);
+    } finally {
+      await done(ms());
+    }
+  });
+});
+
+/**
+ * Диагноз одной ошибки. Их три, и путать нельзя: Telegram отказал — виноват
+ * запрос, сеть отвалилась — виновата дорога, всё остальное — виноваты мы.
  *
+ * «message is not modified» не ошибка вовсе: экран уже в нужном состоянии,
+ * и это ровно то, чего мы добивались.
+ */
+function report(e: unknown): void {
+  if (isNotModified(e)) return;
+
+  if (e instanceof GrammyError) {
+    log.error("telegram.error", e.description, { method: e.method });
+  } else if (e instanceof HttpError) {
+    log.error("network.error", e);
+  } else {
+    log.error("bot.error", e);
+    // Стек нужен только у нашей собственной ошибки: у первых двух он ведёт
+    // внутрь grammY и не говорит ничего.
+    console.error(e);
+  }
+}
+
+/**
+ * Наружу ошибка не всплывает никогда: человеку — тост о том, что искры на месте.
+ * Не ответить на коллбэк нельзя — иначе на кнопке вечно крутятся часики.
+ */
+async function apologise(ctx: Context): Promise<void> {
+  if (!ctx.callbackQuery) return;
+  try {
+    await ctx.answerCallbackQuery({ text: t("toast.error"), show_alert: true });
+  } catch {
+    /* ответить по коллбэку тоже не вышло — это уже не важно */
+  }
+}
+
+/**
  * Сбой добора не должен ронять обработку апдейта: человек нажал кнопку и своё
  * получил, а недошедший кадр подберёт следующий заход или крон.
  */
-bot.use(async (ctx, next) => {
-  await next();
-  const chatId = ctx.chat?.id;
-  if (chatId === undefined) return;
+async function catchUpQuietly(chatId: number): Promise<void> {
   try {
     await catchUp(chatId);
   } catch (e) {
-    console.error("catchUp failed", chatId, e);
+    log.error("catchUp", e, { chatId });
   }
-});
+}
+
+/**
+ * Апдейт длиннее срока вебхука — это не медленный ответ, а брошенная работа:
+ * функция умрёт, не дописав. Считается отдельно, потому что отвечает на вопрос
+ * «бот тормозит или тонет», а на него отвечать нужно до жалоб, а не после.
+ */
+const SLOW_UPDATE_MS = WEBHOOK_TIMEOUT_MS * 0.8;
+
+async function done(took: number): Promise<void> {
+  if (took < SLOW_UPDATE_MS) {
+    log.info("update.done", { ms: took });
+    return;
+  }
+  log.warn("update.slow", { ms: took, limit: SLOW_UPDATE_MS });
+  await bump("update_slow");
+}
+
+/**
+ * Что это был за апдейт — одной строкой для лога.
+ *
+ * Текст человека сюда не попадает: это описание кадра, то есть личное.
+ * Команда попадает первым словом и подрезанной — «/фыва» отличить от «/start»
+ * надо, а читать через лог чужие сообщения нельзя.
+ */
+function kindOf(ctx: Context): string {
+  if (ctx.callbackQuery) return `cb:${ctx.callbackQuery.data ?? "?"}`;
+  if (ctx.preCheckoutQuery) return "precheckout";
+  if (ctx.message?.successful_payment) return "payment";
+  if (ctx.message?.photo) return "photo";
+
+  const text = ctx.message?.text;
+  if (text === undefined) return "other";
+  return text.startsWith("/") ? `cmd:${text.split(" ")[0].slice(0, 24)}` : "text";
+}
 
 // ── Команды ──────────────────────────────────────────────────────────────────
 /**
@@ -111,7 +213,7 @@ bot.command("start", async (ctx) => {
   // на входе, а не экран. Повторный /start ничего не сбрасывает и не дарит снова.
   if (isNew && EXAMPLE_IMAGE_URL) {
     await ctx.replyWithPhoto(EXAMPLE_IMAGE_URL).catch((e) => {
-      console.error("example image failed", e);
+      log.error("start.exampleImage", e);
     });
   }
   await move(chatId, { id: "home" });
@@ -228,6 +330,44 @@ bot.callbackQuery(CB.genReset, async (ctx) => {
   await clearPhotos(ctx.chat!.id);
   await setSource(ctx.chat!.id, "photo");
   await drawHere(ctx, { id: "upload" });
+});
+
+/**
+ * Показать присланные селфи. Единственный способ увидеть, что именно уедет
+ * в модель: в ленте они лежат вперемешку с кадрами и уже уехали вверх, а на
+ * экране их не нарисовать — экран текстовый, и медийным его не сделать.
+ *
+ * Поэтому альбом уходит отдельным объектом в ленту, как уходит готовый кадр,
+ * а экран переезжает под него.
+ *
+ * Ссылки ведут в хранилище kie и живут около суток. Протухли — значит, кадр
+ * по ним всё равно бы не вышел, и честнее убрать их сразу: экран промпта сам
+ * превратится в экран загрузки и попросит селфи заново. Иначе человек заплатил
+ * бы кадром за то, чтобы это выяснить.
+ */
+bot.callbackQuery(CB.genPhotos, async (ctx) => {
+  const chatId = ctx.chat!.id;
+  const urls = await getPhotos(chatId);
+
+  if (urls.length === 0) {
+    await ctx.answerCallbackQuery({ text: t("toast.noPhotos"), show_alert: true });
+    return drawHere(ctx, { id: "upload" });
+  }
+
+  await ctx.answerCallbackQuery();
+  const shown = await album(chatId, urls, t("photos.caption", { selfies: selfies(urls.length) }));
+  await bump("photos_shown");
+
+  if (shown === "gone") {
+    await clearPhotos(chatId);
+    return move(chatId, { id: "upload" }, { notice: t("notice.photosGone") });
+  }
+
+  await move(
+    chatId,
+    { id: "prompt" },
+    { notice: t(shown === "ok" ? "notice.photosShown" : "notice.photosFailed") }
+  );
 });
 
 // ── Оплата ───────────────────────────────────────────────────────────────────
@@ -428,6 +568,22 @@ bot.on("message", async (ctx) => {
 });
 
 /**
+ * Кнопка, адрес которой роутер не знает. Такое случается ровно в одном случае:
+ * человек нажал на экран из чата, оставшийся от прошлой версии бота. Ответить
+ * обязаны — без `answerCallbackQuery` на кнопке вечно крутятся часики.
+ *
+ * Регистрируется последней, поэтому живые адреса сюда не доходят. Экран не
+ * трогаем и перерисовываем на месте: старая копия становится текущим экраном
+ * и собирается из состояния заново, а человек оказывается там, где он есть.
+ */
+bot.on("callback_query", async (ctx) => {
+  log.warn("callback.unknown", { data: ctx.callbackQuery.data });
+  await ctx.answerCallbackQuery({ text: t("toast.outdated"), show_alert: true });
+  if (ctx.chat === undefined) return;
+  await drawHere(ctx, await currentRef(ctx.chat.id));
+});
+
+/**
  * Имя нужно приветствию, а оно рисуется и вне входящего апдейта.
  * Заодно запоминается юзернейм: искать человека в админке иначе, чем по
  * числовому id, нечем — метода «дай id по юзернейму» у Bot API нет.
@@ -446,24 +602,13 @@ async function topupOrigin(chatId: number): Promise<Origin> {
 
 // ── Ошибки ───────────────────────────────────────────────────────────────────
 /**
- * Наружу ошибка не всплывает никогда: человеку — тост о том, что искры на месте,
- * в лог — стек. «message is not modified» не ошибка вовсе: экран уже в нужном
- * состоянии, и это ровно то, чего мы добивались.
+ * Внешняя сеть. Разбор и тост живут в среднем слое — там ещё жив `rid`, без
+ * которого запись в ленте не склеивается с остальной историей события.
  */
 bot.catch(async (err) => {
-  const e = err.error;
-
-  if (isNotModified(e)) return;
-
-  if (e instanceof GrammyError) console.error("Telegram error:", e.description, e.payload);
-  else if (e instanceof HttpError) console.error("Network error:", e);
-  else console.error("Bot error:", e);
-
-  try {
-    if (err.ctx.callbackQuery) {
-      await err.ctx.answerCallbackQuery({ text: t("toast.error"), show_alert: true });
-    }
-  } catch {
-    /* ответить по коллбэку тоже не вышло — это уже не важно */
-  }
+  // Сюда доходит только то, что случилось мимо среднего слоя: он ловит и
+  // разбирает всё, что внутри. Своя ветка нужна всё равно — без `bot.catch`
+  // grammY роняет апдейт наружу, и Telegram начинает слать его заново.
+  report(err.error);
+  await apologise(err.ctx);
 });

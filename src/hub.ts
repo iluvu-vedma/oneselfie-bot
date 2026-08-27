@@ -1,4 +1,6 @@
 import { Context, GrammyError } from "grammy";
+import type { InputMediaPhoto } from "grammy/types";
+import * as log from "./log";
 import type { Screen } from "./screens";
 import { bot } from "./telegram";
 import { getHubId, setHubId, takeHubId } from "./store";
@@ -97,4 +99,58 @@ export async function move(chatId: number, screen: Screen): Promise<void> {
     await bot.api.deleteMessage(chatId, old).catch(() => {});
   }
   await send(chatId, screen);
+}
+
+/**
+ * Пачка картинок отдельным объектом в ленте.
+ *
+ * Экраном это быть не может в принципе: текстовое сообщение нельзя превратить
+ * в медийное, а весь интерфейс бота — текстовый. Поэтому селфи приезжают
+ * альбомом, как приезжает готовый кадр, а экран после этого переезжает вниз.
+ *
+ * Ссылки ведут в хранилище kie, а оно временное. Протухшую ссылку Telegram
+ * не заберёт и ответит отказом — это не поломка, а нормальный конец жизни
+ * файла, и звонить владельцу тут не о чем. Возвращаем false, экран скажет
+ * человеку прислать селфи заново.
+ */
+export type AlbumResult = "ok" | "gone" | "failed";
+
+/** Отказ Telegram забрать картинку по ссылке. Файла больше нет — значит, нет. */
+function isGoneMedia(e: unknown): boolean {
+  return (
+    e instanceof GrammyError &&
+    /failed to get HTTP URL content|wrong file identifier|WEBPAGE_|IMAGE_PROCESS_FAILED|wrong remote file/i.test(
+      e.description
+    )
+  );
+}
+
+export async function album(
+  chatId: number,
+  urls: string[],
+  caption: string
+): Promise<AlbumResult> {
+  if (urls.length === 0) return "gone";
+
+  // Подпись — только у первой картинки: Telegram показывает её под всей пачкой,
+  // а на каждой отдельно это был бы повтор одного и того же текста.
+  const media: InputMediaPhoto[] = urls.map((url, i) => ({
+    type: "photo",
+    media: url,
+    ...(i === 0 ? { caption, parse_mode: "HTML" as const } : {}),
+  }));
+
+  try {
+    await bot.api.sendMediaGroup(chatId, media);
+    return "ok";
+  } catch (e) {
+    // Протухшая ссылка — не поломка, а нормальный конец жизни временного файла,
+    // и звонить о ней владельцу не о чем. Всё остальное — настоящая ошибка.
+    if (isGoneMedia(e)) {
+      log.warn("album.gone", { chatId, count: urls.length });
+      return "gone";
+    }
+    log.error("album.failed", e, { chatId, count: urls.length });
+    return "failed";
+  }
 }
