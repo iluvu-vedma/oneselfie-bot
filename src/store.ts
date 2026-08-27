@@ -3,6 +3,7 @@ import {
   GEN_LOCK_TTL_SEC,
   HUB_TTL_SEC,
   MAX_PHOTOS,
+  PHOTO_TTL_SEC,
   ModelId,
   TASK_TTL_SEC,
   isModelId,
@@ -17,6 +18,11 @@ export interface UserProfile {
   status: UserStatus;
   /** Имя из Telegram. Нужно приветствию, которое рисуется и без входящего апдейта. */
   name: string;
+  /**
+   * @username без собачки. Единственный способ найти человека в админке иначе,
+   * чем по числовому id, — метода «дай id по юзернейму» у Bot API нет.
+   */
+  username: string;
   /** Выбранная модель. null — человек ещё не доходил до выбора. */
   model: ModelId | null;
   source: Source | null;
@@ -45,9 +51,11 @@ export interface TaskRecord {
 
 /** Создаёт профиль, если его нет. Повторный /start ничего не сбрасывает. */
 export async function ensureUser(chatId: number): Promise<boolean> {
-  const created = await redis.hsetnx(k.user(chatId), "createdAt", Date.now());
+  const now = Date.now();
+  const created = await redis.hsetnx(k.user(chatId), "createdAt", now);
   if (created) {
     await redis.hset(k.user(chatId), { status: "started", fails: 0 });
+    await redis.zadd(k.users, { score: now, member: String(chatId) });
     await bump("start_new");
   }
   return created === 1;
@@ -59,6 +67,7 @@ export async function getUser(chatId: number): Promise<UserProfile> {
   return {
     status: (raw.status as UserStatus) ?? "started",
     name: raw.name ? String(raw.name) : "",
+    username: raw.username ? String(raw.username) : "",
     // Значение из KV не бывает доверенным: реестр моделей мог поменяться между деплоями.
     model: isModelId(raw.model) ? raw.model : null,
     source,
@@ -68,9 +77,25 @@ export async function getUser(chatId: number): Promise<UserProfile> {
   };
 }
 
-/** Имя запоминается, а не берётся из апдейта: экран перерисовывается и по крону. */
-export async function setName(chatId: number, name: string): Promise<void> {
-  if (name) await redis.hset(k.user(chatId), { name });
+/**
+ * Имя и юзернейм запоминаются, а не берутся из апдейта: экран перерисовывается
+ * и по крону, а админка ищет людей вообще без входящего сообщения.
+ *
+ * Здесь же чинится индекс людей: профили, заведённые до появления админки,
+ * иначе не попали бы в список никогда. `nx` не даёт свежей дате затереть
+ * настоящую дату регистрации у тех, кто уже в индексе.
+ */
+export async function touchUser(
+  chatId: number,
+  name?: string,
+  username?: string
+): Promise<void> {
+  const patch: Record<string, string> = {};
+  if (name) patch.name = name;
+  if (username) patch.username = username;
+  if (Object.keys(patch).length > 0) await redis.hset(k.user(chatId), patch);
+  if (username) await redis.set(k.uname(username), chatId);
+  await redis.zadd(k.users, { nx: true }, { score: Date.now(), member: String(chatId) });
 }
 
 export async function setStatus(chatId: number, status: UserStatus): Promise<void> {
@@ -202,6 +227,10 @@ export async function photoCount(chatId: number): Promise<number> {
  */
 export async function reservePhotoSlot(chatId: number): Promise<number | null> {
   const slot = num(await redis.incr(k.photoSlots(chatId)));
+  // Срок ставится на первом слоте и больше не продлевается: счётчик обязан
+  // умереть не позже списка ссылок, иначе слоты останутся заняты при пустом
+  // списке и человек не сможет прислать новое селфи.
+  if (slot === 1) await redis.expire(k.photoSlots(chatId), PHOTO_TTL_SEC);
   if (slot > MAX_PHOTOS) {
     await redis.decr(k.photoSlots(chatId));
     return null;
@@ -214,7 +243,11 @@ export async function releasePhotoSlot(chatId: number): Promise<void> {
 }
 
 export async function addPhotoUrl(chatId: number, url: string): Promise<number> {
-  return num(await redis.rpush(k.photos(chatId), url));
+  const length = num(await redis.rpush(k.photos(chatId), url));
+  // Срок отсчитывается от ПЕРВОГО селфи, а не от последнего: в kie раньше всех
+  // умрёт именно первый файл, и список должен уйти вместе с ним целиком.
+  if (length === 1) await redis.expire(k.photos(chatId), PHOTO_TTL_SEC);
+  return length;
 }
 
 /** Селфи сбрасываются, баланс искр остаётся — он привязан к человеку, а не к фото. */
@@ -239,6 +272,7 @@ export async function createTaskRecord(
   await redis.hset(k.task(taskId), { chatId, model, prompt, cost, lock, createdAt: now });
   await redis.expire(k.task(taskId), TASK_TTL_SEC);
   await redis.zadd(k.pending, { score: now, member: taskId });
+  await redis.set(k.chatTask(chatId), taskId, { ex: TASK_TTL_SEC });
 }
 
 export async function getTask(taskId: string): Promise<TaskRecord | null> {
@@ -273,6 +307,16 @@ export async function forgetPending(taskId: string): Promise<void> {
   await redis.zrem(k.pending, taskId);
 }
 
+/**
+ * Задача, которую человек ждёт прямо сейчас. Указатель нарочно не стирается
+ * после выдачи: добор всё равно перечитывает саму задачу и по флагам sent /
+ * refunded видит, что делать больше нечего.
+ */
+export async function getChatTask(chatId: number): Promise<string | null> {
+  const id = await redis.get<string>(k.chatTask(chatId));
+  return id ? String(id) : null;
+}
+
 /** Задачи старше cutoff, всё ещё висящие без результата. */
 export async function pendingOlderThan(cutoffMs: number, limit = 25): Promise<string[]> {
   const ids = await redis.zrange<string[]>(k.pending, 0, cutoffMs, { byScore: true });
@@ -302,4 +346,121 @@ export async function markPhotosReady(chatId: number): Promise<boolean> {
 /** То же для пополнения: в воронке считаем людей, а не показы. */
 export async function markTopupShown(chatId: number): Promise<boolean> {
   return (await redis.hsetnx(k.user(chatId), "topupCounted", 1)) === 1;
+}
+
+// ── Люди для админки ─────────────────────────────────────────────────────────
+
+/**
+ * Карточка человека одним объектом. Собирается для карточки и для списков,
+ * поэтому баланс лежит рядом с профилем, а не читается вторым заходом.
+ */
+export interface Person extends UserProfile {
+  chatId: number;
+  balance: number;
+}
+
+export async function getPerson(chatId: number): Promise<Person> {
+  const [user, balance] = await Promise.all([getUser(chatId), getBalance(chatId)]);
+  return { ...user, chatId, balance };
+}
+
+/** Последние зарегистрированные — новые сверху. */
+export async function recentUsers(limit: number): Promise<number[]> {
+  const ids = await redis.zrange<string[]>(k.users, 0, limit - 1, { rev: true });
+  return (ids ?? []).map((id) => num(id)).filter((id) => id !== 0);
+}
+
+/** Сколько людей в индексе. Дашборд считает воронку от этого числа, а не от счётчика. */
+export async function usersCount(): Promise<number> {
+  return num(await redis.zcard(k.users));
+}
+
+/**
+ * Люди пачкой. Профиль и баланс каждого — отдельные ключи, поэтому запросы
+ * уходят параллельно: список из восьми не должен стоить восьми задержек подряд.
+ */
+export async function getPeople(ids: number[]): Promise<Person[]> {
+  return Promise.all(ids.map((id) => getPerson(id)));
+}
+
+/**
+ * Поиск по @username. Индекс наш, а юзернейм в Telegram можно сменить и отдать
+ * другому человеку — поэтому найденный профиль обязан подтвердить юзернейм сам.
+ * Иначе искры уехали бы не тому.
+ */
+export async function findByUsername(username: string): Promise<number | null> {
+  const clean = username.replace(/^@/, "").trim();
+  if (!clean) return null;
+  const id = num(await redis.get(k.uname(clean)));
+  if (id === 0) return null;
+  const user = await getUser(id);
+  return user.username.toLowerCase() === clean.toLowerCase() ? id : null;
+}
+
+/** Есть ли вообще такой профиль. Пустой хеш — человека в боте не было. */
+export async function userExists(chatId: number): Promise<boolean> {
+  return (await redis.exists(k.user(chatId))) === 1;
+}
+
+// ── Воронка по людям ─────────────────────────────────────────────────────────
+/**
+ * Счётчики `gen_*` и `paid_*` считают события, а воронка меряется людьми:
+ * один человек с сорока кадрами не должен выглядеть как сорок дошедших.
+ */
+
+/** true — этот человек запустил свой первый кадр. */
+export async function markGenerated(chatId: number): Promise<boolean> {
+  return (await redis.hsetnx(k.user(chatId), "genCounted", 1)) === 1;
+}
+
+/** true — этот человек заплатил впервые. */
+export async function markPaid(chatId: number): Promise<boolean> {
+  return (await redis.hsetnx(k.user(chatId), "paidCounted", 1)) === 1;
+}
+
+// ── Состояние админа ─────────────────────────────────────────────────────────
+/**
+ * Админ ходит по своим экранам и иногда пишет текстом: id человека или сумму.
+ * Отдельный ключ, а не поле в профиле, — админ и сам пользуется ботом, и его
+ * воронка не должна путаться со служебным состоянием.
+ */
+
+/** Куда вернёт «Назад» с карточки: человек мог прийти из сбоев, из списка или из поиска. */
+export type AdminBack = "home" | "fails" | "users" | "find";
+
+export interface AdminState {
+  /** Чью карточку смотрим. 0 — никого. */
+  target: number;
+  /**
+   * Чего ждём от админа текстом: `find` — id или @username, `sum:<причина>` — число.
+   * Пусто — админ ничего не пишет, и текст уходит в обычный сценарий бота.
+   */
+  wait: string;
+  back: AdminBack;
+}
+
+function isAdminBack(v: unknown): v is AdminBack {
+  return v === "home" || v === "fails" || v === "users" || v === "find";
+}
+
+export async function getAdminState(chatId: number): Promise<AdminState> {
+  const raw = (await redis.hgetall<Record<string, unknown>>(k.admin(chatId))) ?? {};
+  return {
+    target: num(raw.target),
+    wait: raw.wait ? String(raw.wait) : "",
+    back: isAdminBack(raw.back) ? raw.back : "home",
+  };
+}
+
+export async function setAdminTarget(chatId: number, target: number): Promise<void> {
+  await redis.hset(k.admin(chatId), { target });
+}
+
+export async function setAdminBack(chatId: number, back: AdminBack): Promise<void> {
+  await redis.hset(k.admin(chatId), { back });
+}
+
+/** Пустая строка снимает ожидание: текст снова уходит в обычный сценарий. */
+export async function setAdminWait(chatId: number, wait: string): Promise<void> {
+  await redis.hset(k.admin(chatId), { wait });
 }

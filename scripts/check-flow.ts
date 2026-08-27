@@ -25,18 +25,7 @@ function telegramError(description: string, method: string): GrammyError {
 }
 
 const fake = new FakeRedis();
-const k = {
-  user: (id: any) => `user:${id}`,
-  balance: (id: any) => `bal:${id}`,
-  photos: (id: any) => `photos:${id}`,
-  photoSlots: (id: any) => `photoslots:${id}`,
-  genLock: (id: any) => `gen:${id}`,
-  hub: (id: any) => `hub:${id}`,
-  task: (id: string) => `task:${id}`,
-  payment: (id: string) => `pay:${id}`,
-  pending: "pending",
-  stat: (e: string) => `stat:${e}`,
-};
+import { k } from "../src/keys";
 
 /** Подмена модуля до того, как его затянут flow/deliver. */
 function stub(name: string, exports: unknown): void {
@@ -114,6 +103,9 @@ stub("owner", { notifyOwner: async () => {}, isOwner: () => false });
 let kieDown = false;
 let taskCounter = 0;
 const kieCalls: { model: string; prompt: string; images: number }[] = [];
+// Состояние задачи глазами kie, когда бот спрашивает сам (коллбэк не дошёл).
+let recordCalls = 0;
+let recordState: "generating" | "success" | "fail" = "generating";
 stub("kie", {
   uploadImage: async () => "https://kie.test/ref.jpg",
   createTask: async (model: string, prompt: string, images: string[]) => {
@@ -121,12 +113,19 @@ stub("kie", {
     kieCalls.push({ model, prompt, images: images.length });
     return `task-${++taskCounter}`;
   },
+  recordInfo: async () => {
+    recordCalls++;
+    return recordState === "success"
+      ? { state: "success", urls: ["https://kie.test/late.jpg"] }
+      : { state: recordState, urls: [], failMsg: "модель отказалась" };
+  },
 });
 
 const S = require("../src/store") as typeof import("../src/store");
 const F = require("../src/flow") as typeof import("../src/flow");
 const D = require("../src/deliver") as typeof import("../src/deliver");
-const { MODELS } = require("../src/config") as typeof import("../src/config");
+const { MODELS, SWEEP_AFTER_SEC, TIMEOUT_SEC } =
+  require("../src/config") as typeof import("../src/config");
 const { t } = require("../src/i18n") as typeof import("../src/i18n");
 
 // ── Проверки ─────────────────────────────────────────────────────────────────
@@ -155,7 +154,7 @@ const PRICE = MODELS.nbpro.price; // 20
 
 async function main(): Promise<void> {
   await S.ensureUser(CHAT);
-  await S.setName(CHAT, "Слава");
+  await S.touchUser(CHAT, "Слава", "slavafan");
 
   await F.move(CHAT, { id: "home" });
   show("/start");
@@ -270,6 +269,49 @@ async function main(): Promise<void> {
   check(last.images === 0, "в режиме «словами» селфи в kie не уходят");
   check(last.prompt === "рыжий кот в скафандре на луне", "промпт уходит без преамбулы про лицо");
   await D.refundTask(`task-${taskCounter}`, (await S.getTask(`task-${taskCounter}`))!, "сброс");
+
+  // ── Коллбэк kie не дошёл ───────────────────────────────────────────────────
+  // Худший из реальных сценариев: искры списаны, kie кадр нарисовал, а вебхук
+  // потерялся. Крон на бесплатном Vercel придёт только ночью — значит забрать
+  // кадр обязано следующее действие самого человека.
+  await S.setSource(CHAT, "photo");
+  const balanceBeforeLost = await S.getBalance(CHAT);
+  recordState = "generating";
+  await F.startGeneration(CHAT, "кадр без коллбэка");
+  const lost = `task-${taskCounter}`;
+
+  await D.catchUp(CHAT);
+  check(recordCalls === 0, "сразу после старта kie не дёргаем: коллбэк ещё в пути");
+
+  // Прошло полторы минуты, коллбэка нет, а кадр у kie давно готов.
+  await fake.hset(k.task(lost), { createdAt: Date.now() - (SWEEP_AFTER_SEC + 5) * 1000 });
+  recordState = "success";
+  await D.catchUp(CHAT);
+  show("Коллбэк не дошёл, человек вернулся в бот");
+  check(recordCalls === 1, "спросили у kie ровно один раз");
+  check(chat[0].kind === "photo", "кадр всё-таки выдан");
+  check(screens().length === 1, "и экран по-прежнему один");
+  check(
+    (await S.getBalance(CHAT)) === balanceBeforeLost - PRICE,
+    "искры не вернулись: кадр приехал, возвращать нечего"
+  );
+  check((await S.isGenerating(CHAT)) === false, "замок отпущен");
+
+  await D.catchUp(CHAT);
+  check(recordCalls === 1, "выданный кадр второй раз у kie не спрашивается");
+
+  // Тот же добор, но кадр не приедет никогда: искры возвращаются без крона.
+  const balanceBeforeDead = await S.getBalance(CHAT);
+  recordState = "generating";
+  await F.startGeneration(CHAT, "кадр, которого не будет");
+  await fake.hset(k.task(`task-${taskCounter}`), {
+    createdAt: Date.now() - (TIMEOUT_SEC + 5) * 1000,
+  });
+  await D.catchUp(CHAT);
+  show("Кадр не приехал за таймаут");
+  check((await S.getBalance(CHAT)) === balanceBeforeDead, "просроченный кадр вернул искры");
+  check(recordCalls === 1, "просроченную задачу у kie не спрашиваем — сразу возврат");
+  check((await S.isGenerating(CHAT)) === false, "и замок отпущен");
 
   // Экран удалили руками: правка падает, бот молча присылает новый экран.
   chat.length = 0;

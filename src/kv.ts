@@ -1,4 +1,6 @@
 import { Redis } from "@upstash/redis";
+import { DAILY_TTL_SEC, REPORT_TZ } from "./config";
+import { k } from "./keys";
 
 /**
  * Key-value без схем, ORM и миграций.
@@ -22,35 +24,8 @@ if (!url || !token) {
 export const redis = new Redis({ url, token });
 
 // ── Ключи ────────────────────────────────────────────────────────────────────
-export const k = {
-  /** Профиль: status, name, model, source, topupFrom, fails, createdAt. Баланса тут НЕТ. */
-  user: (chatId: number | string) => `user:${chatId}`,
-  /**
-   * Баланс искр отдельным ключом-числом.
-   * Только INCRBY/DECRBY — «прочитал объект, изменил поле, записал» ломается
-   * на двух быстрых тапах.
-   */
-  balance: (chatId: number | string) => `bal:${chatId}`,
-  /** Список URL селфи после заливки в kie. */
-  photos: (chatId: number | string) => `photos:${chatId}`,
-  /** Счётчик занятых слотов под селфи. Резервируется до загрузки. */
-  photoSlots: (chatId: number | string) => `photoslots:${chatId}`,
-  /** Замок «кадр уже готовится». Один тап — один кадр. */
-  genLock: (chatId: number | string) => `gen:${chatId}`,
-  /**
-   * message_id экрана. Весь интерфейс живёт в одном сообщении и редактируется;
-   * без этого ключа бот не знает, что именно перерисовывать.
-   */
-  hub: (chatId: number | string) => `hub:${chatId}`,
-  /** Задача генерации. */
-  task: (taskId: string) => `task:${taskId}`,
-  /** Отметка обработанного платежа, чтобы искры не зачислились дважды. */
-  payment: (chargeId: string) => `pay:${chargeId}`,
-  /** Индекс незавершённых задач для аварийного добора: score = createdAt (мс). */
-  pending: "pending",
-  /** Счётчик события. */
-  stat: (event: string) => `stat:${event}`,
-};
+// Карта живёт в keys.ts — ею пользуются и бот, и проверочные скрипты.
+export { k };
 
 export function num(v: unknown, fallback = 0): number {
   if (typeof v === "number") return Number.isFinite(v) ? v : fallback;
@@ -61,10 +36,37 @@ export function num(v: unknown, fallback = 0): number {
   return fallback;
 }
 
-/** Счётчики. Ошибка статистики не должна ронять сценарий. */
+/**
+ * Дата в поясе отчётов, `2026-08-24`. Именно en-CA даёт год-месяц-день —
+ * ключи такого вида сортируются как строки.
+ */
+const DAY = new Intl.DateTimeFormat("en-CA", {
+  timeZone: REPORT_TZ,
+  year: "numeric",
+  month: "2-digit",
+  day: "2-digit",
+});
+
+export function dayKey(at: number = Date.now()): string {
+  return DAY.format(at);
+}
+
+/**
+ * Счётчики. Ошибка статистики не должна ронять сценарий.
+ *
+ * Пишутся два числа: за всё время и за сегодня. Срок дневному ключу ставится
+ * только в момент его появления — иначе EXPIRE уходил бы на каждое событие.
+ */
 export async function bump(event: string, by = 1): Promise<void> {
   try {
-    await redis.incrby(k.stat(event), by);
+    const day = k.statDay(event, dayKey());
+    await Promise.all([
+      redis.incrby(k.stat(event), by),
+      (async () => {
+        const total = num(await redis.incrby(day, by));
+        if (total === by) await redis.expire(day, DAILY_TTL_SEC);
+      })(),
+    ]);
   } catch (e) {
     console.error("stat failed", event, e);
   }

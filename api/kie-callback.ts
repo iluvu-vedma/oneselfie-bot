@@ -1,6 +1,6 @@
 import type { VercelRequest, VercelResponse } from "@vercel/node";
 import { CALLBACK_SECRET } from "../src/config";
-import { parseTaskData } from "../src/kie";
+import { parseTaskData, taskIdOf } from "../src/kie";
 import { deliverTask, refundTask } from "../src/deliver";
 import { getTask } from "../src/store";
 
@@ -14,7 +14,7 @@ export default async function handler(req: VercelRequest, res: VercelResponse) {
   try {
     const body = typeof req.body === "string" ? JSON.parse(req.body) : req.body;
     const data = body?.data ?? body;
-    const taskId = data?.taskId ? String(data.taskId) : "";
+    const taskId = taskIdOf(body);
     if (!taskId) return res.status(200).json({ ok: true, skipped: "no taskId" });
 
     const task = await getTask(taskId);

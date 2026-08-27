@@ -11,14 +11,31 @@ export const CURRENCY_EMOJI = "✨";
 // ── Модели ───────────────────────────────────────────────────────────────────
 export type ModelId = "nbpro" | "sd5" | "nb2" | "gpt2";
 
+/**
+ * Семейство API. У каждого вендора своя схема `input` — общей нет:
+ * nano-banana берёт `image_input` + `resolution`, seedream — `image_urls` +
+ * `quality`, gpt-image — `input_urls` и без `output_format`. Сборка живёт
+ * в `kie.ts`, здесь только имя семейства.
+ */
+export type ModelFamily = "nano" | "seedream" | "gpt";
+
 export interface ModelInfo {
   id: ModelId;
+  family: ModelFamily;
   /**
-   * Что уходит в kie. ПРОВЕРИТЬ ПО КАТАЛОГУ kie ПЕРЕД ЗАПУСКОМ: из четырёх
-   * слагов в бою жил только `nano-banana-2`. Неверный слаг — createTask падает
-   * и искры возвращаются сами, но модель не работает.
+   * Слаг для кадра по описанию словами. Слаги сверены запросом к kie 27.08.2026:
+   * `seedream-5-pro` и `gpt-image-2` не существуют вовсе, у них раздельные
+   * эндпоинты на текст и на фото. Проверить слаг можно бесплатно —
+   * createTask с `input: {}`: живая модель ответит «prompt is required»,
+   * мёртвая — 422 «model name not supported».
    */
-  kieId: string;
+  kieText: string;
+  /**
+   * Слаг для кадра по фото. У nano-banana он совпадает с текстовым: там
+   * референсы — необязательное поле одной и той же модели. У seedream и
+   * gpt-image это отдельные модели, и слаг обязан меняться вместе с режимом.
+   */
+  kiePhoto: string;
   icon: string;
   /** Цена кадра в искрах. Лестница 10-12-15-20 посчитана в docs/interface-v2.md §2б. */
   price: number;
@@ -29,10 +46,46 @@ export interface ModelInfo {
 }
 
 export const MODELS: Record<ModelId, ModelInfo> = {
-  nbpro: { id: "nbpro", kieId: "nano-banana-pro", icon: "🍌", price: 20, costUsd: 0.09, photo: true },
-  sd5: { id: "sd5", kieId: "seedream-5-pro", icon: "🌱", price: 15, costUsd: 0.07, photo: true },
-  nb2: { id: "nb2", kieId: "nano-banana-2", icon: "🍌", price: 12, costUsd: 0.06, photo: true },
-  gpt2: { id: "gpt2", kieId: "gpt-image-2", icon: "🧠", price: 10, costUsd: 0.05, photo: true },
+  nbpro: {
+    id: "nbpro",
+    family: "nano",
+    kieText: "nano-banana-pro",
+    kiePhoto: "nano-banana-pro",
+    icon: "🍌",
+    price: 20,
+    costUsd: 0.09,
+    photo: true,
+  },
+  sd5: {
+    id: "sd5",
+    family: "seedream",
+    kieText: "seedream/5-pro-text-to-image",
+    kiePhoto: "seedream/5-pro-image-to-image",
+    icon: "🌱",
+    price: 15,
+    costUsd: 0.07,
+    photo: true,
+  },
+  nb2: {
+    id: "nb2",
+    family: "nano",
+    kieText: "nano-banana-2",
+    kiePhoto: "nano-banana-2",
+    icon: "🍌",
+    price: 12,
+    costUsd: 0.06,
+    photo: true,
+  },
+  gpt2: {
+    id: "gpt2",
+    family: "gpt",
+    kieText: "gpt-image-2-text-to-image",
+    kiePhoto: "gpt-image-2-image-to-image",
+    icon: "🧠",
+    price: 10,
+    costUsd: 0.05,
+    photo: true,
+  },
 };
 
 /**
@@ -63,11 +116,23 @@ export const DEAREST_MODEL: ModelId = MODEL_ORDER.reduce((a, b) =>
 export const MIN_PRICE = MODELS[CHEAPEST_MODEL].price;
 
 // ── Параметры генерации ──────────────────────────────────────────────────────
-/** Разрешение: "1K" | "2K" | "4K". Понижение до 1K — рычаг на случай плохой выплаты. */
-export const MODEL_RESOLUTION = "2K";
-/** Продукт про людей, поэтому портрет. Выбора соотношения в интерфейсе нет. */
+/**
+ * Разрешение: "1K" | "2K" | "4K". Понижение до 1K — рычаг на случай плохой выплаты.
+ * У seedream поля `resolution` нет вовсе, там это `quality`: basic = 1K, high = 2K.
+ * Перевод делает `kie.ts`, четвёртой константы для этого не заводим.
+ */
+export const MODEL_RESOLUTION: "1K" | "2K" | "4K" = "2K";
+/**
+ * Продукт про людей, поэтому портрет. Выбора соотношения в интерфейсе нет.
+ * 3:4 есть в enum всех четырёх моделей — менять на что-то другое можно только
+ * сверившись со всеми сразу.
+ */
 export const MODEL_ASPECT_RATIO = "3:4";
-export const MODEL_OUTPUT_FORMAT = "jpg";
+/**
+ * Формат кадра. Пишется как `jpg`, но у seedream тот же формат называется
+ * `jpeg`, а gpt-image-2 поля вовсе не принимает. Разбирается в `kie.ts`.
+ */
+export const MODEL_OUTPUT_FORMAT: "jpg" | "png" = "jpg";
 
 /** +10% на брак и повторы. */
 export const RETRY_OVERHEAD = 1.1;
@@ -173,6 +238,16 @@ export function sparksOf(pack: Pack, method: PayMethod): number {
 // ── Загрузка селфи ───────────────────────────────────────────────────────────
 /** Одного селфи уже достаточно, поэтому отдельного шага «Готово» в потоке нет. */
 export const MAX_PHOTOS = 4;
+/**
+ * Сколько живёт список ссылок на селфи. Ссылки ведут в хранилище kie, а оно
+ * временное: дока обещает то 24 часа, то 3 дня. Держать ссылку дольше самого
+ * файла нельзя — человек вернётся через сутки, нажмёт «сделать кадр», и в
+ * модель уедут мёртвые URL. Двадцать часов — с запасом внутри худшего обещания.
+ *
+ * Протухший список не ломает поток: экран промпта сам превращается в экран
+ * загрузки, а startGeneration просит прислать селфи заново.
+ */
+export const PHOTO_TTL_SEC = 20 * 60 * 60;
 
 // ── Промпт ───────────────────────────────────────────────────────────────────
 /** Короче — почти наверняка случайное сообщение, а не описание кадра. */
@@ -249,3 +324,62 @@ export const PROMPT_PREFIX =
 export const PROMPT_SUFFIX =
   "Natural skin texture with visible pores, sharp focus on the eyes, professional colour grading. " +
   "No text, no logo, no watermark, no extra people, no distorted hands.";
+
+// ── Админка ──────────────────────────────────────────────────────────────────
+/**
+ * Кто, кроме владельца, видит админку. Список chat_id через запятую.
+ * Пусто — админка только у OWNER_CHAT_ID.
+ */
+export const ADMIN_IDS: string[] = (process.env.ADMIN_IDS ?? "")
+  .split(/[,\s]+/)
+  .map((s) => s.trim())
+  .filter(Boolean);
+
+/**
+ * Часовой пояс отчётов. По нему считаются и дневные счётчики, и даты в карточке:
+ * иначе «сегодня» на дашборде и «сегодня» в голове владельца — разные дни.
+ */
+export const REPORT_TZ = "Europe/Moscow";
+
+/** Лестница ручного начисления. Экран сумм собирается из неё, руками нигде не дублируется. */
+export const GRANT_AMOUNTS: number[] = [10, 20, 50, 100, 250, 500];
+/** Потолок одной ручной операции. Защита от лишнего нуля в «своей сумме». */
+export const GRANT_MAX = 10000;
+
+/** За что начисляем. Причина обязательна — без неё лог через месяц ничего не объясняет. */
+export type GrantReason = "fail" | "bonus" | "comp" | "fix";
+/** Причины начисления. `fix` сюда не входит: это списание, и оно всегда правка. */
+export const GRANT_REASONS: GrantReason[] = ["fail", "bonus", "comp"];
+/** Причина списания. Одна, поэтому экрана выбора у списания нет. */
+export const TAKE_REASON: GrantReason = "fix";
+
+export function isGrantReason(v: unknown): v is GrantReason {
+  return v === "fail" || v === "bonus" || v === "comp" || v === "fix";
+}
+
+/** Знак операции выводится из причины, а не едет отдельным параметром. */
+export function signOf(reason: GrantReason): 1 | -1 {
+  return reason === TAKE_REASON ? -1 : 1;
+}
+
+/** Сколько операций хранится в истории одного человека. */
+export const LEDGER_KEEP = 50;
+/** Сколько сбоев хранится в общем логе и сколько — в личном. */
+export const FAILS_KEEP = 100;
+export const USER_FAILS_KEEP = 10;
+/** Сколько ручных начислений хранится в логе админов. */
+export const GRANTS_KEEP = 100;
+
+/** Сколько строк истории и сбоев показывает карточка. */
+export const CARD_OPS = 8;
+export const CARD_FAILS = 3;
+/** Сколько строк в списках сбоев и людей. */
+export const LIST_ROWS = 8;
+/**
+ * Сколько кнопок-людей под списком. Больше не влезает: сверху ещё «Обновить»
+ * и «Назад», а потолок экрана — восемь кнопок.
+ */
+export const LIST_BUTTONS = 5;
+
+/** Сколько живёт дневной счётчик. Больше месяца истории дашборду не нужно. */
+export const DAILY_TTL_SEC = 45 * 24 * 60 * 60;

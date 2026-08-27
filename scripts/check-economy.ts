@@ -100,9 +100,21 @@ check(
   "синяя кнопка не на флагмане: первый кадр новичка не должен стоить дороже всех"
 );
 check(
-  new Set(MODEL_ORDER.map((id) => MODELS[id].kieId)).size === MODEL_ORDER.length,
-  "у каждой модели свой id в kie"
+  new Set(MODEL_ORDER.map((id) => MODELS[id].kieText)).size === MODEL_ORDER.length &&
+    new Set(MODEL_ORDER.map((id) => MODELS[id].kiePhoto)).size === MODEL_ORDER.length,
+  "у каждой модели свои слаги в kie — и на текст, и на фото"
 );
+// Слаг с опечаткой kie принимает молча на этапе конфига и роняет только в бою,
+// когда искры уже списаны. Форма слага — единственное, что можно проверить
+// локально: либо голый (`nano-banana-2`), либо `вендор/модель-вариант`.
+for (const id of MODEL_ORDER) {
+  for (const slug of [MODELS[id].kieText, MODELS[id].kiePhoto]) {
+    check(
+      /^[a-z0-9]+(?:[-.][a-z0-9]+)*(?:\/[a-z0-9]+(?:[-.][a-z0-9]+)*)?$/.test(slug),
+      `${id}: слаг «${slug}» похож на слаг kie`
+    );
+  }
+}
 console.log("");
 
 // ── Пакеты ───────────────────────────────────────────────────────────────────

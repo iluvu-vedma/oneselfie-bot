@@ -2,6 +2,8 @@ import { InlineKeyboard } from "grammy";
 import {
   CHANNEL_URL,
   CURRENCY_EMOJI,
+  GRANT_REASONS,
+  GrantReason,
   MODELS,
   MODEL_ORDER,
   MIN_PRICE,
@@ -14,6 +16,7 @@ import {
   Pack,
   PayMethod,
   RECOMMENDED_METHOD,
+  TAKE_REASON,
   bonusOf,
   isModelId,
   priceOf,
@@ -278,4 +281,48 @@ export function earnKeyboard(): InlineKeyboard {
 export function originOf(raw: string): Origin {
   if (isOrigin(raw)) return raw;
   return isModelId(raw) ? raw : "home";
+}
+
+// ── callback_data админки ────────────────────────────────────────────────────
+/**
+ * Отдельный префикс `adm:` — по нему роутер отсекает служебные адреса от
+ * пользовательских одним взглядом, а не разбором каждого имени.
+ *
+ * Кого именно правим, едет прямо в адресе кнопки, а не берётся из состояния.
+ * Это единственное исключение из правила «в callback только то, чего нет в
+ * сессии», и оно про деньги: админ мог открыть карточку в другом чате или
+ * нажать кнопку на экране, который уже уехал вверх, — сумма обязана уйти тому,
+ * чьё имя он видел на этом экране.
+ *
+ * Самый длинный адрес — `adm:g:1234567890:bonus:10000`, 29 байт при лимите 64.
+ */
+const REASONS = `(${[...GRANT_REASONS, TAKE_REASON].join("|")})`;
+
+export const ACB = {
+  home: "adm:home",
+  fails: "adm:fails",
+  users: "adm:users",
+  find: "adm:find",
+  /** Карточка человека. */
+  card: (id: number) => `adm:u:${id}`,
+  /** За что начисляем. */
+  reason: (id: number) => `adm:r:${id}`,
+  /** Сколько. */
+  amount: (id: number, reason: GrantReason) => `adm:s:${id}:${reason}`,
+  /** Своя сумма: дальше ждём число сообщением. */
+  custom: (id: number, reason: GrantReason) => `adm:c:${id}:${reason}`,
+  /** Единственная кнопка, которая двигает баланс. */
+  apply: (id: number, reason: GrantReason, amount: number) =>
+    `adm:g:${id}:${reason}:${amount}`,
+
+  CARD_RE: /^adm:u:(\d+)$/,
+  REASON_RE: /^adm:r:(\d+)$/,
+  AMOUNT_RE: new RegExp(`^adm:s:(\\d+):${REASONS}$`),
+  CUSTOM_RE: new RegExp(`^adm:c:(\\d+):${REASONS}$`),
+  APPLY_RE: new RegExp(`^adm:g:(\\d+):${REASONS}:(\\d+)$`),
+} as const;
+
+/** «@slavafan» или «id 483920112» — человек без юзернейма тоже должен быть назван. */
+export function personName(username: string, chatId: number): string {
+  return username ? `@${username}` : t("admin.idOnly", { id: String(chatId) });
 }

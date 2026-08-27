@@ -8,18 +8,7 @@ import { FakeRedis } from "./fake-redis";
 // Подменяем модуль KV до того, как его затянет store.
 const kvPath = require.resolve("../src/kv");
 const fake = new FakeRedis();
-const k = {
-  user: (id: any) => `user:${id}`,
-  balance: (id: any) => `bal:${id}`,
-  photos: (id: any) => `photos:${id}`,
-  photoSlots: (id: any) => `photoslots:${id}`,
-  genLock: (id: any) => `gen:${id}`,
-  hub: (id: any) => `hub:${id}`,
-  task: (id: string) => `task:${id}`,
-  payment: (id: string) => `pay:${id}`,
-  pending: "pending",
-  stat: (e: string) => `stat:${e}`,
-};
+import { k } from "../src/keys";
 require.cache[kvPath] = {
   id: kvPath,
   filename: kvPath,
@@ -33,7 +22,8 @@ require.cache[kvPath] = {
 } as any;
 
 const S = require("../src/store") as typeof import("../src/store");
-const { MODELS } = require("../src/config") as typeof import("../src/config");
+const { MODELS, PHOTO_TTL_SEC } =
+  require("../src/config") as typeof import("../src/config");
 
 let failed = 0;
 function check(ok: boolean, label: string) {
@@ -141,6 +131,18 @@ async function main() {
   check((await S.isGenerating(chat)) === true, "с замком генерация идёт");
   await S.releaseGenLock(chat, genToken);
 
+  // Ссылки на селфи ведут во временное хранилище kie и обязаны умереть раньше
+  // самих файлов, иначе кадр уедет по мёртвым URL. Счётчик слотов уходит вместе
+  // со списком — иначе слоты останутся заняты, а прислать новое селфи нельзя.
+  const fresh = 777;
+  await S.reservePhotoSlot(fresh);
+  await S.addPhotoUrl(fresh, "https://kie.test/ref.jpg");
+  const photosTtl = await fake.ttl(k.photos(fresh));
+  const slotsTtl = await fake.ttl(k.photoSlots(fresh));
+  check(photosTtl > 0 && photosTtl <= PHOTO_TTL_SEC, `у списка селфи есть срок (${photosTtl} с)`);
+  check(slotsTtl > 0 && slotsTtl <= photosTtl, "счётчик слотов умирает не позже списка");
+  check(PHOTO_TTL_SEC < 24 * 60 * 60, "срок короче обещанных kie суток хранения");
+
   // «Заменить фото»: селфи сбрасываются, баланс и выбранная модель остаются.
   await S.credit(chat, 60);
   await S.clearPhotos(chat);
@@ -150,6 +152,35 @@ async function main() {
       (await S.getModel(chat)) === "nb2",
     "сброс фото сохранил баланс и выбранную модель"
   );
+
+  // ── Коллбэк kie ────────────────────────────────────────────────────────────
+  // Форматов у kie два, и разбор обязан понимать оба: не разобрал taskId —
+  // кадр не выдан и искры не возвращены, задача просто виснет до крона.
+  const K = require("../src/kie") as typeof import("../src/kie");
+
+  const RESULT = '{"resultUrls":["https://tempfile.test/a.jpg"]}';
+  const jobs = {
+    code: 200,
+    data: { taskId: "abc123", state: "success", resultJson: RESULT },
+  };
+  const webhook = {
+    taskId: "abc123",
+    code: 200,
+    data: { task_id: "abc123", callbackType: "task_completed", resultJson: RESULT },
+  };
+
+  for (const [name, body] of [["jobs API", jobs], ["webhook", webhook]] as const) {
+    const info = K.parseTaskData((body as any).data);
+    check(K.taskIdOf(body) === "abc123", `${name}: taskId вынут`);
+    check(info.state === "success", `${name}: состояние прочитано`);
+    check(info.urls[0] === "https://tempfile.test/a.jpg", `${name}: ссылка на кадр найдена`);
+  }
+
+  check(
+    K.parseTaskData({ callbackType: "task_failed", fail_msg: "модель отказалась" }).state === "fail",
+    "провал во втором формате тоже читается как провал"
+  );
+  check(K.taskIdOf({ code: 200 }) === "", "чужое тело не превращается в задачу");
 
   console.log(failed === 0 ? "\nВсё сошлось." : `\nПровалено проверок: ${failed}`);
   process.exit(failed === 0 ? 0 : 1);

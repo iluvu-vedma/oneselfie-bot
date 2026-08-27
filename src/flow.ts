@@ -10,13 +10,14 @@ import * as hub from "./hub";
 import { t } from "./i18n";
 import { createTask } from "./kie";
 import { bump } from "./kv";
+import * as ledger from "./ledger";
 import { notifyOwner } from "./owner";
 import { buildPrompt } from "./prompt";
 import * as screens from "./screens";
 import type { Notice, Screen } from "./screens";
 import { bot } from "./telegram";
 import * as store from "./store";
-import { Origin, originOf, sparks } from "./ui";
+import { Origin, modelName, originOf, sparks } from "./ui";
 
 /**
  * Слой между состоянием и экранами. Экран — чистая функция, состояние живёт
@@ -182,6 +183,7 @@ export async function startGeneration(chatId: number, userPrompt: string): Promi
     );
   }
 
+  await ledger.record(chatId, "spend", -cost, modelName(model));
   await draw(chatId, { id: "busy" });
   await bot.api.sendChatAction(chatId, "upload_photo").catch(() => {});
 
@@ -194,6 +196,17 @@ export async function startGeneration(chatId: number, userPrompt: string): Promi
     await store.releaseGenLock(chatId, lock);
     await bump("gen_failed");
     await bump("sparks_refunded", cost);
+    // В лог сбоев — вместе с возвратом: админка отвечает на вопрос «кому должны»,
+    // а не «что упало», и без отметки о возврате этот ответ не собрать.
+    await ledger.record(chatId, "back", cost, t("admin.fail.start"));
+    await ledger.logFail({
+      at: Date.now(),
+      chatId,
+      model,
+      cost,
+      reason: t("admin.fail.start"),
+      back: true,
+    });
     await notifyOwner(`createTask (${model}) упал у ${chatId}: ${String(e)}`);
     return draw(
       chatId,
@@ -204,4 +217,6 @@ export async function startGeneration(chatId: number, userPrompt: string): Promi
 
   await store.createTaskRecord(taskId, chatId, model, userPrompt, cost, lock);
   await bump(`gen_${model}`);
+  // Воронка меряется людьми: сороковой кадр одного человека — не сороковой дошедший.
+  if (await store.markGenerated(chatId)) await bump("gen_users");
 }
