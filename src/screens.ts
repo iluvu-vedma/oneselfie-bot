@@ -155,6 +155,11 @@ export interface ModelState extends Notice {
 export function model(s: ModelState): Screen {
   const info = MODELS[s.model];
   const needTopup = s.balance < info.price;
+  // Два способа — двумя строками, а не двумя блоками с заголовками: заголовки
+  // слово в слово повторяли кнопки, стоящие прямо под ними.
+  const ways = [info.photo && t("model.way.photo"), t("model.way.text")].filter(
+    (line): line is string => Boolean(line)
+  );
 
   return {
     text: compose(
@@ -163,8 +168,7 @@ export function model(s: ModelState): Screen {
         t("models.item.plain", { icon: info.icon, name: modelName(s.model) }),
         t(`model.${s.model}.about`),
       ],
-      info.photo && [t("model.photo.title"), t("model.photo.body")],
-      [t("model.text.title"), t("model.text.body")],
+      ways,
       contextLine(s.model, s.balance),
       t(`model.${s.model}.weak`),
       t("common.bridge")
@@ -218,8 +222,8 @@ export function prompt(s: PromptState): Screen {
         t("prompt.title", { selfies: selfies(s.photos) }),
         full ? t("prompt.full") : t("prompt.more"),
       ],
-      [t("prompt.ask.title"), t("prompt.ask.body")],
-      t("prompt.example"),
+      // Пример — часть просьбы, а не отдельная мысль: между ними пустой строки нет.
+      [t("prompt.ask.title"), t("prompt.ask.body"), t("prompt.example")],
       contextLine(s.model, s.balance),
       t("prompt.bridge")
     ),
@@ -238,8 +242,7 @@ export function describe(s: DescribeState): Screen {
   return {
     text: compose(
       s.notice,
-      [t("describe.title"), t("describe.body")],
-      t("describe.example"),
+      [t("describe.title"), t("describe.body"), t("describe.example")],
       t("describe.howto"),
       contextLine(s.model, s.balance),
       t("describe.bridge")
